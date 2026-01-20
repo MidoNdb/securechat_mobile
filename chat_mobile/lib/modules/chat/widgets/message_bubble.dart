@@ -73,8 +73,9 @@ class MessageBubble extends StatelessWidget {
             ),
             const SizedBox(height: 4),
           ],
+          // ✅ CORRIGÉ: Utilise decryptedContent au lieu de content
           Text(
-            message.content ?? '',
+            message.decryptedContent ?? '[Message chiffré]',
             style: TextStyle(
               color: isMe ? Colors.white : Colors.black87,
               fontSize: 15,

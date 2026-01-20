@@ -68,11 +68,11 @@ class AppPages {
 //     Get.lazyPut<ChatController>(() => ChatController());
 //   }),
 // ),
-    // GetPage(
-    //   name: AppRoutes.CHAT,
-    //   page: () => ChatView(),
-    //   binding: ChatBinding(),
-    // ),
+    GetPage(
+      name: AppRoutes.CHAT,
+      page: () => ChatView(),
+      binding: ChatBinding(),
+    ),
     GetPage(name: AppRoutes.CALLS, page: () => CallsView(), binding: ChatBinding()),
     GetPage(name: AppRoutes.SETTINGS, page: () => SettingsView(), binding: ChatBinding()),
     GetPage(name: AppRoutes.PROFILE, page: () => ProfileView(), binding: ChatBinding())

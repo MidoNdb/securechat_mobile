@@ -1,845 +1,988 @@
 // lib/data/services/message_service.dart
 
-import 'package:get/get.dart' hide FormData, MultipartFile;
-import 'package:dio/dio.dart';
-import '../models/conversation.dart';
-import '../models/message.dart';
-import '../api/dio_client.dart';
+import 'dart:async';
+import 'dart:math';
+import 'package:get/get.dart';
 import '../api/api_endpoints.dart';
-import 'secure_storage_service.dart';
+import '../api/dio_client.dart';
+import '../models/message.dart';
+import '../models/conversation.dart';
 import 'crypto_service.dart';
+import 'websocket_service.dart';
+import 'auth_service.dart';
+import 'secure_storage_service.dart';
 
 class MessageService extends GetxService {
-  late final DioClient _dioClient;
-  late final SecureStorageService _storage;
-  late final CryptoService _crypto;
+  final DioClient _dioClient = Get.find<DioClient>();
+  final CryptoService _cryptoService = Get.find<CryptoService>();
+  final WebSocketService _wsService = Get.find<WebSocketService>();
+  final AuthService _authService = Get.find<AuthService>();
+  final SecureStorageService _secureStorage = Get.find<SecureStorageService>();
+  
+  StreamSubscription? _wsSubscription;
+  
+  final _newMessagesController = StreamController<Message>.broadcast();
+  Stream<Message> get newMessagesStream => _newMessagesController.stream;
   
   @override
   void onInit() {
     super.onInit();
-    _dioClient = Get.find<DioClient>();
-    _storage = Get.find<SecureStorageService>();
-    _crypto = CryptoService();
+    _listenWebSocket();
+    print('✅ MessageService initialized');
   }
-
- Future<Map<String, dynamic>?> getCurrentUser() async {
+  
+  @override
+  void onClose() {
+    _wsSubscription?.cancel();
+    _newMessagesController.close();
+    super.onClose();
+  }
+  
+  void _listenWebSocket() {
+    _wsSubscription = _wsService.messageStream.listen((data) {
+      final type = data['type'] as String?;
+      
+      if (type == 'new_message') {
+        _handleNewMessage(data);
+      } else if (type == 'typing') {
+        print('⌨️ ${data['user_name']} typing...');
+      } else if (type == 'message_read_receipt') {
+        print('✅ Message read: ${data['message_id']}');
+      }
+    });
+  }
+  
+  void _handleNewMessage(Map<String, dynamic> data) {
     try {
-      final response = await _dioClient.get('/api/auth/me/');
+      final messageData = data['message'] as Map<String, dynamic>;
+      final message = Message.fromJson(messageData);
+      
+      print('📨 New message: ${message.id}');
+      
+      final currentUserId = _authService.currentUser.value?.userId;
+      if (message.senderId != currentUserId) {
+        _decryptAndEmit(message);
+      } else {
+        _newMessagesController.add(message);
+      }
+      
+    } catch (e) {
+      print('❌ Handle new message error: $e');
+    }
+  }
+  
+  Future<void> _decryptAndEmit(Message message) async {
+    try {
+      final decrypted = await decryptMessage(message);
+      final decryptedMessage = message.copyWith(decryptedContent: decrypted);
+      _newMessagesController.add(decryptedMessage);
+    } catch (e) {
+      print('❌ Decrypt and emit error: $e');
+      _newMessagesController.add(message);
+    }
+  }
+  
+  Future<List<Conversation>?> getConversations() async {
+    try {
+      print('📥 Fetching conversations...');
+      
+      final response = await _dioClient.privateDio.get(ApiEndpoints.conversations);
       
       if (response.statusCode == 200) {
-        return response.data;
+        final data = response.data['data'] as List;
+        final conversations = data.map((json) => Conversation.fromJson(json)).toList();
+        print('✅ ${conversations.length} conversations loaded');
+        return conversations;
       }
-      return null;
-    } catch (e) {
-      print('❌ getCurrentUser: $e');
-      return null;
-    }
-  }
-  // ==================== CONVERSATIONS ====================
-
-  Future<List<Conversation>?> getConversations({int page = 1}) async {
-    try {
-      final response = await _dioClient.get(
-        ApiEndpoints.conversations,
-        queryParameters: {'page': page},
-      );
-
-      if (response.statusCode != 200) return null;
-
-      final List<dynamic> data = _extractList(response.data);
-      final conversations = <Conversation>[];
-
-      for (var json in data) {
-        final conv = Conversation.fromJson(json);
-        
-        if (conv.lastMessage?.encryptedContent != null) {
-          try {
-            final decrypted = await _decryptMessage(conv.lastMessage!);
-            conversations.add(conv.copyWith(
-              lastMessage: conv.lastMessage!.copyWith(content: decrypted),
-            ));
-          } catch (e) {
-            conversations.add(conv.copyWith(
-              lastMessage: conv.lastMessage!.copyWith(content: '🔒 Chiffré'),
-            ));
-          }
-        } else {
-          conversations.add(conv);
-        }
-      }
-
-      return conversations;
-    } catch (e) {
-      print('❌ getConversations: $e');
-      return null;
-    }
-  }
-
-  // ✅ CRÉER CONVERSATION DIRECTE
-  Future<Conversation?> createDirectConversation(String contactUserId) async {
-    try {
-      print('📤 Creating conversation with user: $contactUserId');
       
-      final response = await _dioClient.post(
-        ApiEndpoints.conversations,
+      throw Exception('Error ${response.statusCode}');
+    } catch (e) {
+      print('❌ getConversations error: $e');
+      return null;
+    }
+  }
+  
+  Future<Conversation?> createDirectConversation(String participantUserId) async {
+    try {
+      print('📝 Creating conversation with: $participantUserId');
+      
+      final response = await _dioClient.privateDio.post(
+        ApiEndpoints.createConversation,
         data: {
           'type': 'DIRECT',
-          'participant_ids': [contactUserId],
+          'participant_ids': [participantUserId],
         },
       );
-
-      if (response.statusCode == 201 || response.statusCode == 200) {
-        final data = response.data;
-        
-        if (data['success'] == true && data['data'] != null) {
-          print('✅ Conversation created: ${data['data']['id']}');
-          return Conversation.fromJson(data['data']);
-        }
+      
+      if (response.statusCode == 201) {
+        final conversation = Conversation.fromJson(response.data['data']);
+        print('✅ Conversation created: ${conversation.id}');
+        return conversation;
+      }
+      
+      throw Exception('Error ${response.statusCode}');
+    } catch (e) {
+      print('❌ createDirectConversation error: $e');
+      return null;
+    }
+  }
+  
+  Future<Map<String, dynamic>?> getCurrentUser() async {
+    try {
+      final response = await _dioClient.privateDio.get(ApiEndpoints.me);
+      
+      if (response.statusCode == 200) {
+        return response.data['data'] as Map<String, dynamic>;
       }
       
       return null;
     } catch (e) {
-      print('❌ createDirectConversation: $e');
+      print('❌ getCurrentUser error: $e');
+      return null;
+    }
+  }
+  
+  Future<Message> sendMessage({
+    required String conversationId,
+    required String recipientUserId,
+    required String content,
+    String type = 'TEXT',
+    Map<String, dynamic>? metadata,
+  }) async {
+    try {
+      print('📤 Sending message...');
+      
+      final encrypted = await encryptMessage(recipientUserId, content);
+      
+      final data = {
+        'conversation_id': conversationId,
+        'recipient_user_id': recipientUserId,
+        'type': type,
+        'encrypted_content': encrypted['ciphertext'],
+        'nonce': encrypted['nonce'],
+        'auth_tag': encrypted['auth_tag'],
+        'signature': encrypted['signature'],
+        if (metadata != null) 'metadata': metadata,
+      };
+      
+      final response = await _dioClient.privateDio.post(
+        ApiEndpoints.sendMessage,
+        data: data,
+      );
+      
+      if (response.statusCode == 201) {
+        final messageData = response.data['data'] as Map<String, dynamic>;
+        final message = Message.fromJson(messageData);
+        
+        print('✅ Message sent: ${message.id}');
+        
+        await _secureStorage.saveMessagePlaintext(message.id, content);
+        
+        return message.copyWith(decryptedContent: content);
+      }
+      
+      throw Exception('Error ${response.statusCode}');
+    } catch (e) {
+      print('❌ sendMessage error: $e');
+      rethrow;
+    }
+  }
+  
+  Future<List<Message>> getConversationMessages({
+    required String conversationId,
+    int page = 1,
+    int pageSize = 50,
+  }) async {
+    try {
+      print('📥 Fetching messages: $conversationId');
+      
+      final response = await _dioClient.privateDio.get(
+        ApiEndpoints.getMessagesByConversation(conversationId),
+        queryParameters: {
+          'page': page,
+          'page_size': pageSize,
+        },
+      );
+      
+      if (response.statusCode == 200) {
+        final data = response.data['data'] as List;
+        final messages = data.map((json) => Message.fromJson(json)).toList();
+        
+        print('✅ ${messages.length} messages fetched');
+        
+        final decryptedMessages = await _decryptMessages(messages);
+        
+        return decryptedMessages;
+      }
+      
+      throw Exception('Error ${response.statusCode}');
+    } catch (e) {
+      print('❌ getConversationMessages error: $e');
       rethrow;
     }
   }
 
-  // ==================== MESSAGES ====================
-// lib/data/services/message_service.dart
-
-Future<List<Message>?> getMessages(
-  String conversationId,
-  {int page = 1, int pageSize = 50}
-) async {
-  try {
-    print('🔄 Loading messages for conversation: $conversationId');
-    
-    final response = await _dioClient.get(
-      ApiEndpoints.getMessagesByConversation(conversationId),  // ✅ Correct
-      queryParameters: {'page': page, 'page_size': pageSize},
-    );
-
-    if (response.statusCode != 200) return null;
-
-    // ✅ Extraction depuis success response
-    final data = response.data;
-    final List<dynamic> messagesList = data['data'] ?? data['results'] ?? [];
-    
-    final messages = <Message>[];
-
-    print('📥 Received ${messagesList.length} messages');
-
-    for (var json in messagesList) {
-      final message = Message.fromJson(json);
-      
-      if (message.encryptedContent != null) {
-        try {
-          final decrypted = await _decryptMessage(message);
-          messages.add(message.copyWith(content: decrypted));
-        } catch (e) {
-          print('⚠️ Decrypt error for message ${message.id}: $e');
-          messages.add(message.copyWith(content: '🔒 Erreur déchiffrement'));
-        }
-      } else {
-        messages.add(message);
+  Future<List<Message>> _decryptMessages(List<Message> messages) async {
+  final decrypted = <Message>[];
+  final currentUserId = _authService.currentUser.value?.userId;
+  
+  for (final message in messages) {
+    try {
+      // Vérifier d'abord si le message a les champs E2EE
+      if (message.nonce == null || message.authTag == null || message.signature == null) {
+        print('⚠️ Message sans champs E2EE: ${message.id}');
+        decrypted.add(message.copyWith(
+          decryptedContent: '[Message non chiffré]'
+        ));
+        continue;
       }
+      
+      final cached = await _secureStorage.getMessagePlaintext(message.id);
+      
+      if (cached != null && message.senderId == currentUserId) {
+        decrypted.add(message.copyWith(decryptedContent: cached));
+        print('✅ From cache: ${message.id}');
+        continue;
+      }
+      
+      final content = await decryptMessage(message);
+      decrypted.add(message.copyWith(decryptedContent: content));
+      
+      final preview = content.length > 20 ? '${content.substring(0, 20)}...' : content;
+      print('✅ Decrypted: ${message.id} - "$preview"');
+      
+    } catch (e) {
+      print('❌ Decrypt error ${message.id}: $e');
+      
+      // ✅ Gérer gracieusement - Message illisible
+      String fallbackText;
+      
+      if (e.toString().contains('Signature invalide')) {
+        fallbackText = '[Message chiffré avec anciennes clés - illisible]';
+      } else if (e.toString().contains('E2EE fields missing')) {
+        fallbackText = '[Message non chiffré]';
+      } else {
+        fallbackText = '[Erreur de déchiffrement]';
+      }
+      
+      decrypted.add(message.copyWith(decryptedContent: fallbackText));
     }
+  }
+  
+  return decrypted;
+}
 
-    print('✅ Loaded ${messages.length} messages');
-    return messages;
+Future<String> decryptMessage(Message message) async {
+  try {
+    print('🔓 Decrypting from: ${message.senderId}');
+    
+    // ✅ Vérification stricte des champs E2EE
+    if (message.nonce == null || message.nonce!.isEmpty) {
+      throw Exception('E2EE fields missing: nonce is null or empty');
+    }
+    if (message.authTag == null || message.authTag!.isEmpty) {
+      throw Exception('E2EE fields missing: authTag is null or empty');
+    }
+    if (message.signature == null || message.signature!.isEmpty) {
+      throw Exception('E2EE fields missing: signature is null or empty');
+    }
+    
+    final myDhPrivate = await _secureStorage.getDHPrivateKey();
+    
+    if (myDhPrivate == null) {
+      throw Exception('Private key missing');
+    }
+    
+    final currentUserId = _authService.currentUser.value?.userId;
+    
+    String otherUserId;
+    if (message.senderId == currentUserId) {
+      if (message.recipientUserId == null) {
+        throw Exception('recipientUserId missing for own message');
+      }
+      otherUserId = message.recipientUserId!;
+      print('  → Using recipient keys: $otherUserId');
+    } else {
+      otherUserId = message.senderId;
+      print('  → Using sender keys: $otherUserId');
+    }
+    
+    final otherUserKeys = await _getRecipientPublicKeys(otherUserId);
+    
+    final plaintext = await _cryptoService.decryptMessage(
+      ciphertextB64: message.encryptedContent,
+      nonceB64: message.nonce!,
+      authTagB64: message.authTag!,
+      signatureB64: message.signature!,
+      myDhPrivateKeyB64: myDhPrivate,
+      theirDhPublicKeyB64: otherUserKeys['dh_public_key']!,
+      theirSignPublicKeyB64: otherUserKeys['sign_public_key']!,
+    );
+    
+    print('✅ Decrypted');
+    
+    return plaintext;
   } catch (e) {
-    print('❌ getMessages: $e');
-    return null;
+    print('❌ decryptMessage error: $e');
+    rethrow;
   }
 }
-  // ✅ Signature corrigée: String conversationId
-  Future<Message?> sendMessage({
-    required String conversationId,  // ✅ String UUID
-    required String content,
-    required String recipientUserId,
-  }) async {
+  
+  // Future<List<Message>> _decryptMessages(List<Message> messages) async {
+  //   final decrypted = <Message>[];
+  //   final currentUserId = _authService.currentUser.value?.userId;
+    
+  //   for (final message in messages) {
+  //     try {
+  //       final cached = await _secureStorage.getMessagePlaintext(message.id);
+        
+  //       if (cached != null && message.senderId == currentUserId) {
+  //         decrypted.add(message.copyWith(decryptedContent: cached));
+  //         print('✅ From cache: ${message.id}');
+  //         continue;
+  //       }
+        
+  //       final content = await decryptMessage(message);
+  //       decrypted.add(message.copyWith(decryptedContent: content));
+        
+  //       final preview = content.length > 20 ? '${content.substring(0, 20)}...' : content;
+  //       print('✅ Decrypted: ${message.id} - "$preview"');
+        
+  //     } catch (e) {
+  //       print('❌ Decrypt error ${message.id}: $e');
+  //       decrypted.add(message);
+  //     }
+  //   }
+    
+  //   return decrypted;
+  // }
+  
+  Future<void> markConversationAsRead(String conversationId) async {
     try {
-      print('📤 Sending message to conversation: $conversationId');
+      await _dioClient.privateDio.post(
+        ApiEndpoints.markAsRead,
+        data: {'conversation_id': conversationId},
+      );
+      print('✅ Marked as read');
+    } catch (e) {
+      print('❌ markConversationAsRead error: $e');
+    }
+  }
+  
+  Future<Map<String, String>> encryptMessage(
+    String recipientUserId,
+    String plaintext,
+  ) async {
+    try {
+      print('🔐 Encrypting for: $recipientUserId');
       
-      final recipientKeys = await _getPublicKeys(recipientUserId);
-      if (recipientKeys == null) {
-        throw Exception('Clés destinataire introuvables');
-      }
-
-      final myDhPrivate = await _storage.getDHPrivateKey();
-      final mySignPrivate = await _storage.getSignPrivateKey();
-
+      final myDhPrivate = await _secureStorage.getDHPrivateKey();
+      final mySignPrivate = await _secureStorage.getSignPrivateKey();
+      
       if (myDhPrivate == null || mySignPrivate == null) {
-        throw Exception('Clés privées manquantes');
+        throw Exception('Private keys missing');
       }
-
-      print('🔐 Encrypting message...');
-      final encrypted = await _crypto.encryptMessage(
-        plaintext: content,
+      
+      final recipientKeys = await _getRecipientPublicKeys(recipientUserId);
+      
+      final encrypted = await _cryptoService.encryptMessage(
+        plaintext: plaintext,
         myDhPrivateKeyB64: myDhPrivate,
         theirDhPublicKeyB64: recipientKeys['dh_public_key']!,
         mySignPrivateKeyB64: mySignPrivate,
       );
-
-      final response = await _dioClient.post(
-        ApiEndpoints.sendMessage,
-        data: {
-          'conversation_id': conversationId,  // ✅ String UUID
-          'type': 'text',
-          'ciphertext': encrypted['ciphertext'],
-          'nonce': encrypted['nonce'],
-          'auth_tag': encrypted['auth_tag'],
-          'signature': encrypted['signature'],
-        },
-      );
-
-      if (response.statusCode == 200 || response.statusCode == 201) {
-        print('✅ Message sent successfully');
-        return Message.fromJson(response.data).copyWith(content: content);
-      }
       
-      return null;
+      print('✅ Encrypted');
+      
+      return encrypted;
     } catch (e) {
-      print('❌ sendMessage: $e');
-      return null;
+      print('❌ encryptMessage error: $e');
+      rethrow;
     }
   }
-
-  // ✅ Signature corrigée: String conversationId
-  Future<bool> markAsRead(String conversationId) async {  // ✅ String UUID
-    try {
-      print('📖 Marking conversation as read: $conversationId');
+  
+  // Future<String> decryptMessage(Message message) async {
+  //   try {
+  //     print('🔓 Decrypting from: ${message.senderId}');
       
-      final response = await _dioClient.post(
-        ApiEndpoints.markAsRead,
-        data: {'conversation_id': conversationId},  // ✅ String UUID
+  //     if (message.nonce == null || message.authTag == null || message.signature == null) {
+  //       throw Exception('E2EE fields missing');
+  //     }
+      
+  //     final myDhPrivate = await _secureStorage.getDHPrivateKey();
+      
+  //     if (myDhPrivate == null) {
+  //       throw Exception('Private key missing');
+  //     }
+      
+  //     final currentUserId = _authService.currentUser.value?.userId;
+      
+  //     String otherUserId;
+  //     if (message.senderId == currentUserId) {
+  //       if (message.recipientUserId == null) {
+  //         throw Exception('recipientUserId missing for own message');
+  //       }
+  //       otherUserId = message.recipientUserId!;
+  //       print('  → Using recipient keys: $otherUserId');
+  //     } else {
+  //       otherUserId = message.senderId;
+  //       print('  → Using sender keys: $otherUserId');
+  //     }
+      
+  //     final otherUserKeys = await _getRecipientPublicKeys(otherUserId);
+      
+  //     final plaintext = await _cryptoService.decryptMessage(
+  //       ciphertextB64: message.encryptedContent,
+  //       nonceB64: message.nonce!,
+  //       authTagB64: message.authTag!,
+  //       signatureB64: message.signature!,
+  //       myDhPrivateKeyB64: myDhPrivate,
+  //       theirDhPublicKeyB64: otherUserKeys['dh_public_key']!,
+  //       theirSignPublicKeyB64: otherUserKeys['sign_public_key']!,
+  //     );
+      
+  //     print('✅ Decrypted');
+      
+  //     return plaintext;
+  //   } catch (e) {
+  //     print('❌ decryptMessage error: $e');
+  //     rethrow;
+  //   }
+  // }
+  
+  Future<Map<String, String>> _getRecipientPublicKeys(String userId) async {
+    try {
+      final response = await _dioClient.privateDio.get(
+        ApiEndpoints.getPublicKeys(userId),
       );
-      
-      return response.statusCode == 200;
-    } catch (e) {
-      print('❌ markAsRead: $e');
-      return false;
-    }
-  }
-
-  // ==================== HELPERS ====================
-
-  Future<String> _decryptMessage(Message message) async {
-    final senderKeys = await _getPublicKeys(message.senderId.toString());
-    final myDhPrivate = await _storage.getDHPrivateKey();
-
-    if (senderKeys == null || myDhPrivate == null) {
-      throw Exception('Clés manquantes pour déchiffrement');
-    }
-
-    return await _crypto.decryptMessage(
-      ciphertextB64: message.encryptedContent!['ciphertext'],
-      nonceB64: message.encryptedContent!['nonce'],
-      authTagB64: message.encryptedContent!['auth_tag'],
-      signatureB64: message.encryptedContent!['signature'],
-      myDhPrivateKeyB64: myDhPrivate,
-      theirDhPublicKeyB64: senderKeys['dh_public_key']!,
-      theirSignPublicKeyB64: senderKeys['sign_public_key']!,
-    );
-  }
-
-  Future<Map<String, String>?> _getPublicKeys(String userId) async {
-    try {
-      final response = await _dioClient.get('/api/users/$userId/public-keys/');
       
       if (response.statusCode == 200) {
-        final data = response.data;
+        final data = response.data['data'] as Map<String, dynamic>;
         return {
-          'dh_public_key': data['dh_public_key'],
-          'sign_public_key': data['sign_public_key'],
+          'dh_public_key': data['dh_public_key'] as String,
+          'sign_public_key': data['sign_public_key'] as String,
         };
       }
-      return null;
+      
+      throw Exception('Error ${response.statusCode}');
     } catch (e) {
-      print('❌ _getPublicKeys: $e');
-      return null;
+      print('❌ getPublicKeys error: $e');
+      rethrow;
     }
   }
-
-  List<dynamic> _extractList(dynamic data) {
-    if (data is Map) {
-      return data['results'] ?? data['data'] ?? [];
-    }
-    if (data is List) {
-      return data;
-    }
-    return [];
+  
+  void joinConversation(String conversationId) {
+    _wsService.joinConversation(conversationId);
+  }
+  
+  void sendTypingIndicator(String conversationId, bool isTyping) {
+    _wsService.sendTyping(conversationId, isTyping);
   }
 }
 
+
+
 // // lib/data/services/message_service.dart
 
-// import 'package:get/get.dart' hide FormData, MultipartFile;
-// import 'package:dio/dio.dart';
-// import '../models/conversation.dart';
-// import '../models/message.dart';
-// import '../api/dio_client.dart';
+// import 'dart:async';
+// import 'dart:math';
+// import 'package:get/get.dart';
 // import '../api/api_endpoints.dart';
-// import 'secure_storage_service.dart';
+// import '../api/dio_client.dart';
+// import '../models/message.dart';
+// import '../models/conversation.dart';
 // import 'crypto_service.dart';
+// import 'websocket_service.dart';
+// import 'auth_service.dart';
+// import 'secure_storage_service.dart';
 
+// /// Service de gestion des messages
+// /// 
+// /// Architecture B (HTTP + WebSocket HYBRIDE):
+// /// - ENVOI: HTTP POST (fiable, retry automatique)
+// /// - RÉCEPTION: WebSocket push (temps réel < 100ms)
 // class MessageService extends GetxService {
-//   late final DioClient _dioClient;
-//   late final SecureStorageService _storage;
-//   late final CryptoService _crypto;
+//   // ═══════════════════════════════════════════════════════════════
+//   // DÉPENDANCES
+//   // ═══════════════════════════════════════════════════════════════
+  
+//   final DioClient _dioClient = Get.find<DioClient>();
+//   final CryptoService _cryptoService = Get.find<CryptoService>();
+//   final WebSocketService _wsService = Get.find<WebSocketService>();
+//   final AuthService _authService = Get.find<AuthService>();
+//   final SecureStorageService _secureStorage = Get.find<SecureStorageService>();
+  
+//   StreamSubscription? _wsSubscription;
+  
+//   // Stream controller pour les nouveaux messages
+//   final _newMessagesController = StreamController<Message>.broadcast();
+//   Stream<Message> get newMessagesStream => _newMessagesController.stream;
+  
+//   // ═══════════════════════════════════════════════════════════════
+//   // INITIALISATION
+//   // ═══════════════════════════════════════════════════════════════
   
 //   @override
 //   void onInit() {
 //     super.onInit();
-//     _dioClient = Get.find<DioClient>();
-//     _storage = Get.find<SecureStorageService>();
-//     _crypto = CryptoService();
+//     _listenWebSocket();
+//     print('✅ MessageService initialized');
 //   }
-
-//   // ==================== CONVERSATIONS ====================
-
-//   Future<List<Conversation>?> getConversations({int page = 1}) async {
-//     try {
-//       final response = await _dioClient.get(
-//         ApiEndpoints.conversations,
-//         queryParameters: {'page': page},
-//       );
-
-//       if (response.statusCode != 200) return null;
-
-//       final List<dynamic> data = _extractList(response.data);
-//       final conversations = <Conversation>[];
-
-//       for (var json in data) {
-//         final conv = Conversation.fromJson(json);
-        
-//         if (conv.lastMessage?.encryptedContent != null) {
-//           try {
-//             final decrypted = await _decryptMessage(conv.lastMessage!);
-//             conversations.add(conv.copyWith(
-//               lastMessage: conv.lastMessage!.copyWith(content: decrypted),
-//             ));
-//           } catch (e) {
-//             conversations.add(conv.copyWith(
-//               lastMessage: conv.lastMessage!.copyWith(content: '🔒 Chiffré'),
-//             ));
-//           }
-//         } else {
-//           conversations.add(conv);
-//         }
+  
+//   @override
+//   void onClose() {
+//     _wsSubscription?.cancel();
+//     _newMessagesController.close();
+//     super.onClose();
+//   }
+  
+//   // ═══════════════════════════════════════════════════════════════
+//   // ÉCOUTE WEBSOCKET (RÉCEPTION TEMPS RÉEL)
+//   // ═══════════════════════════════════════════════════════════════
+  
+//   /// Écouter les messages WebSocket
+//   void _listenWebSocket() {
+//     _wsSubscription = _wsService.messageStream.listen((data) {
+//       final type = data['type'] as String?;
+      
+//       if (type == 'new_message') {
+//         _handleNewMessage(data);
+//       } else if (type == 'typing') {
+//         _handleTypingIndicator(data);
+//       } else if (type == 'message_read_receipt') {
+//         _handleReadReceipt(data);
 //       }
-
-//       return conversations;
+//     });
+//   }
+  
+//   /// Gérer nouveau message reçu via WebSocket
+//   void _handleNewMessage(Map<String, dynamic> data) {
+//     try {
+//       final messageData = data['message'] as Map<String, dynamic>;
+      
+//       // Convertir en Message
+//       final message = Message.fromJson(messageData);
+      
+//       print('📨 Nouveau message reçu: ${message.id}');
+      
+//       // Déchiffrer si ce n'est pas notre message
+//       final currentUserId = _authService.currentUser.value?.userId;
+//       if (message.senderId != currentUserId) {
+//         _decryptAndEmit(message);
+//       } else {
+//         // Notre propre message (déjà déchiffré)
+//         _newMessagesController.add(message);
+//       }
+      
 //     } catch (e) {
-//       print('❌ getConversations: $e');
+//       print('❌ Erreur traitement nouveau message: $e');
+//     }
+//   }
+  
+//   /// Déchiffrer un message et l'émettre
+//   /// /// Déchiffrer une liste de messages
+// Future<List<Message>> _decryptMessages(List<Message> messages) async {
+//   final decrypted = <Message>[];
+//   final currentUserId = _authService.currentUser.value?.userId;
+  
+//   for (final message in messages) {
+//     try {
+//       // ✅ CORRECTION : Déchiffrer TOUS les messages, même les nôtres
+//       // Car ils sont stockés chiffrés sur le serveur
+      
+//       final content = await decryptMessage(message);
+      
+//       decrypted.add(message.copyWith(decryptedContent: content));
+      
+//       print('✅ Message ${message.id} déchiffré: ${content.substring(0, min(20, content.length))}...');
+      
+//     } catch (e) {
+//       print('❌ Erreur déchiffrement message ${message.id}: $e');
+//       // Ajouter quand même le message (chiffré)
+//       decrypted.add(message);
+//     }
+//   }
+  
+//   return decrypted;
+// }
+
+// Future<void> _decryptAndEmit(Message message) async {
+//   try {
+//     // Déchiffrer le message
+//       final decrypted = await decryptMessage(message);
+      
+//       // Créer nouveau message avec contenu déchiffré
+//       final decryptedMessage = message.copyWith(
+//         decryptedContent: decrypted,
+//       );
+      
+//       // Émettre dans le stream
+//       _newMessagesController.add(decryptedMessage);
+      
+//     } catch (e) {
+//       print('❌ Erreur déchiffrement message: $e');
+//       // Émettre quand même le message (chiffré)
+//       _newMessagesController.add(message);
+//     }
+//   }
+  
+//   void _handleTypingIndicator(Map<String, dynamic> data) {
+//     // TODO: Implémenter si nécessaire
+//     print('⌨️ ${data['user_name']} est en train d\'écrire...');
+//   }
+  
+//   void _handleReadReceipt(Map<String, dynamic> data) {
+//     // TODO: Implémenter si nécessaire
+//     print('✅ Message lu: ${data['message_id']}');
+//   }
+  
+//   // ═══════════════════════════════════════════════════════════════
+//   // CONVERSATIONS (pour MessagesController)
+//   // ═══════════════════════════════════════════════════════════════
+  
+//   /// Récupérer toutes les conversations
+//   Future<List<Conversation>?> getConversations() async {
+//     try {
+//       print('📥 Récupération conversations...');
+      
+//       final response = await _dioClient.privateDio.get(
+//         ApiEndpoints.conversations,
+//       );
+      
+//       if (response.statusCode == 200) {
+//         final data = response.data['data'] as List;
+//         final conversations = data
+//             .map((json) => Conversation.fromJson(json))
+//             .toList();
+        
+//         print('✅ ${conversations.length} conversations récupérées');
+        
+//         return conversations;
+//       } else {
+//         throw Exception('Erreur récupération conversations: ${response.statusCode}');
+//       }
+      
+//     } catch (e) {
+//       print('❌ Erreur getConversations: $e');
 //       return null;
 //     }
 //   }
-
-//   // lib/data/services/message_service.dart
-
-// // Ajouter cette méthode
-// Future<Conversation?> createDirectConversation(String contactUserId) async {
-//   try {
-//     print('📤 Creating conversation with user: $contactUserId');
-    
-//     final response = await _dioClient.post(
-//       ApiEndpoints.conversations,
-//       data: {
-//         'type': 'DIRECT',
-//         'participant_ids': [contactUserId],  // ✅ UUID en liste
-//       },
-//     );
-
-//     if (response.statusCode == 201 || response.statusCode == 200) {
-//       final data = response.data;
+  
+//   /// Créer une conversation directe avec un contact
+//   Future<Conversation?> createDirectConversation(String participantUserId) async {
+//     try {
+//       print('📝 Création conversation avec: $participantUserId');
       
-//       if (data['success'] == true && data['data'] != null) {
-//         print('✅ Conversation created: ${data['data']['id']}');
-//         return Conversation.fromJson(data['data']);
+//       final response = await _dioClient.privateDio.post(
+//         ApiEndpoints.createConversation,
+//         data: {
+//           'type': 'DIRECT',
+//           'participant_ids': [participantUserId],
+//         },
+//       );
+      
+//       if (response.statusCode == 201) {
+//         final conversation = Conversation.fromJson(response.data['data']);
+//         print('✅ Conversation créée: ${conversation.id}');
+//         return conversation;
+//       } else {
+//         throw Exception('Erreur création conversation: ${response.statusCode}');
 //       }
+      
+//     } catch (e) {
+//       print('❌ Erreur createDirectConversation: $e');
+//       return null;
 //     }
-    
-//     return null;
-//   } catch (e) {
-//     print('❌ createDirectConversation: $e');
-//     rethrow;
 //   }
-// }
-//   // ==================== MESSAGES ====================
-
-//   Future<List<Message>?> getMessages(
-//     String conversationId, {
+  
+//   /// Récupérer les infos du user actuel
+//   Future<Map<String, dynamic>?> getCurrentUser() async {
+//     try {
+//       final response = await _dioClient.privateDio.get(
+//         ApiEndpoints.me,
+//       );
+      
+//       if (response.statusCode == 200) {
+//         return response.data['data'] as Map<String, dynamic>;
+//       }
+      
+//       return null;
+//     } catch (e) {
+//       print('❌ Erreur getCurrentUser: $e');
+//       return null;
+//     }
+//   }
+  
+//   // ═══════════════════════════════════════════════════════════════
+//   // ENVOI DE MESSAGES (HTTP)
+//   // ═══════════════════════════════════════════════════════════════
+  
+//   /// Envoyer un message chiffré
+//   /// 
+//   /// Architecture B: Utilise HTTP POST (fiable)
+//   Future<Message> sendMessage({
+//     required String conversationId,
+//     required String recipientUserId,
+//     required String content,
+//     String type = 'TEXT',
+//     Map<String, dynamic>? metadata,
+//   }) async {
+//     try {
+//       print('📤 Envoi message via HTTP...');
+      
+//       // 1. Chiffrer le message
+//       final encrypted = await encryptMessage(recipientUserId, content);
+      
+//       // 2. Préparer les données
+//       final data = {
+//         'conversation_id': conversationId,
+//         'type': type,
+//         'encrypted_content': encrypted['ciphertext'],
+//         'nonce': encrypted['nonce'],
+//         'auth_tag': encrypted['auth_tag'],
+//         'signature': encrypted['signature'],
+//         if (metadata != null) 'metadata': metadata,
+//       };
+      
+//       // 3. Envoyer via HTTP POST (utilise privateDio avec AuthInterceptor)
+//       final response = await _dioClient.privateDio.post(
+//         ApiEndpoints.sendMessage,
+//         data: data,
+//       );
+      
+//       if (response.statusCode == 201) {
+//         final messageData = response.data['data'] as Map<String, dynamic>;
+//         final message = Message.fromJson(messageData);
+        
+//         print('✅ Message envoyé via HTTP: ${message.id}');
+        
+//         // Le backend broadcast via WebSocket aux autres participants
+//         // On recevra notre propre message via WebSocket aussi
+        
+//         return message.copyWith(decryptedContent: content);
+//       } else {
+//         throw Exception('Erreur envoi message: ${response.statusCode}');
+//       }
+      
+//     } catch (e) {
+//       print('❌ Erreur sendMessage: $e');
+//       rethrow;
+//     }
+//   }
+  
+//   // ═══════════════════════════════════════════════════════════════
+//   // RÉCUPÉRATION DES MESSAGES (HTTP)
+//   // ═══════════════════════════════════════════════════════════════
+  
+//   /// Récupérer les messages d'une conversation
+//   /// 
+//   /// Utilisé pour:
+//   /// - Chargement initial
+//   /// - Pagination (messages plus anciens)
+//   Future<List<Message>> getConversationMessages({
+//     required String conversationId,
 //     int page = 1,
 //     int pageSize = 50,
 //   }) async {
 //     try {
-//       final response = await _dioClient.get(
+//       print('📥 Récupération messages conversation: $conversationId');
+      
+//       final response = await _dioClient.privateDio.get(
 //         ApiEndpoints.getMessagesByConversation(conversationId),
-//         queryParameters: {'page': page, 'page_size': pageSize},
+//         queryParameters: {
+//           'page': page,
+//           'page_size': pageSize,
+//         },
 //       );
-
-//       if (response.statusCode != 200) return null;
-
-//       final List<dynamic> data = _extractList(response.data);
-//       final messages = <Message>[];
-
-//       for (var json in data) {
-//         final message = Message.fromJson(json);
+      
+//       if (response.statusCode == 200) {
+//         final data = response.data['data'] as List;
+//         final messages = data.map((json) => Message.fromJson(json)).toList();
         
-//         if (message.encryptedContent != null) {
-//           try {
-//             final decrypted = await _decryptMessage(message);
-//             messages.add(message.copyWith(content: decrypted));
-//           } catch (e) {
-//             messages.add(message.copyWith(content: '🔒 Erreur déchiffrement'));
-//           }
-//         } else {
-//           messages.add(message);
-//         }
+//         print('✅ ${messages.length} messages récupérés');
+        
+//         // Déchiffrer tous les messages
+//         final decryptedMessages = await _decryptMessages(messages);
+        
+//         return decryptedMessages;
+//       } else {
+//         throw Exception('Erreur récupération messages: ${response.statusCode}');
 //       }
-
-//       return messages;
+      
 //     } catch (e) {
-//       print('❌ getMessages: $e');
-//       return null;
+//       print('❌ Erreur getConversationMessages: $e');
+//       rethrow;
 //     }
 //   }
-
-//   Future<Message?> sendMessage({
-//     required int conversationId,
-//     required String content,
-//     required String recipientUserId,
-//   }) async {
+  
+//   /// Déchiffrer une liste de messages
+//   // Future<List<Message>> _decryptMessages(List<Message> messages) async {
+//   //   final decrypted = <Message>[];
+//   //   final currentUserId = _authService.currentUser.value?.userId;
+    
+//   //   for (final message in messages) {
+//   //     try {
+//   //       // Si c'est notre message, pas besoin de déchiffrer
+//   //       if (message.senderId == currentUserId) {
+//   //         decrypted.add(message);
+//   //         continue;
+//   //       }
+        
+//   //       // Déchiffrer le message
+//   //       final content = await decryptMessage(message);
+        
+//   //       decrypted.add(message.copyWith(decryptedContent: content));
+        
+//   //     } catch (e) {
+//   //       print('❌ Erreur déchiffrement message ${message.id}: $e');
+//   //       // Ajouter quand même le message (chiffré)
+//   //       decrypted.add(message);
+//   //     }
+//   //   }
+    
+//   //   return decrypted;
+//   // }
+  
+//   // ═══════════════════════════════════════════════════════════════
+//   // MARQUER COMME LU
+//   // ═══════════════════════════════════════════════════════════════
+  
+//   /// Marquer les messages d'une conversation comme lus
+//   Future<void> markConversationAsRead(String conversationId) async {
 //     try {
-//       final recipientKeys = await _getPublicKeys(recipientUserId);
-//       if (recipientKeys == null) {
-//         throw Exception('Clés destinataire introuvables');
-//       }
-
-//       final myDhPrivate = await _storage.getDHPrivateKey();
-//       final mySignPrivate = await _storage.getSignPrivateKey();
-
+//       // Envoyer via HTTP
+//       await _dioClient.privateDio.post(
+//         ApiEndpoints.markAsRead,
+//         data: {'conversation_id': conversationId},
+//       );
+      
+//       print('✅ Conversation marquée comme lue');
+      
+//     } catch (e) {
+//       print('❌ Erreur markConversationAsRead: $e');
+//     }
+//   }
+  
+//   // ═══════════════════════════════════════════════════════════════
+//   // CHIFFREMENT / DÉCHIFFREMENT
+//   // ═══════════════════════════════════════════════════════════════
+  
+//   /// Chiffrer un message pour un destinataire
+//   Future<Map<String, String>> encryptMessage(
+//     String recipientUserId,
+//     String plaintext,
+//   ) async {
+//     try {
+//       print('🔐 Chiffrement message pour user: $recipientUserId');
+      
+//       // 1. Récupérer mes clés privées depuis SecureStorage
+//       final myDhPrivate = await _secureStorage.getDHPrivateKey();
+//       final mySignPrivate = await _secureStorage.getSignPrivateKey();
+      
 //       if (myDhPrivate == null || mySignPrivate == null) {
 //         throw Exception('Clés privées manquantes');
 //       }
-
-//       final encrypted = await _crypto.encryptMessage(
-//         plaintext: content,
+      
+//       // 2. Récupérer les clés publiques du destinataire
+//       final recipientKeys = await _getRecipientPublicKeys(recipientUserId);
+      
+//       // 3. Chiffrer avec TON CryptoService
+//       final encrypted = await _cryptoService.encryptMessage(
+//         plaintext: plaintext,
 //         myDhPrivateKeyB64: myDhPrivate,
 //         theirDhPublicKeyB64: recipientKeys['dh_public_key']!,
 //         mySignPrivateKeyB64: mySignPrivate,
 //       );
-
-//       final response = await _dioClient.post(
-//         ApiEndpoints.sendMessage,
-//         data: {
-//           'conversation_id': conversationId,
-//           'type': 'text',
-//           'ciphertext': encrypted['ciphertext'],
-//           'nonce': encrypted['nonce'],
-//           'auth_tag': encrypted['auth_tag'],
-//           'signature': encrypted['signature'],
-//         },
-//       );
-
-//       if (response.statusCode == 200 || response.statusCode == 201) {
-//         return Message.fromJson(response.data).copyWith(content: content);
+      
+//       print('✅ Message chiffré');
+      
+//       return encrypted;
+      
+//     } catch (e) {
+//       print('❌ Erreur encryptMessage: $e');
+//       rethrow;
+//     }
+//   }
+  
+//   /// Déchiffrer un message reçu
+//   Future<String> decryptMessage(Message message) async {
+//     try {
+//       print('🔓 Déchiffrement message de user: ${message.senderId}');
+      
+//       // Vérifier que les champs E2EE existent
+//       if (message.nonce == null || 
+//           message.authTag == null || 
+//           message.signature == null) {
+//         throw Exception('Champs E2EE manquants');
 //       }
-//       return null;
-//     } catch (e) {
-//       print('❌ sendMessage: $e');
-//       return null;
-//     }
-//   }
-
-//   Future<bool> markAsRead(int conversationId) async {
-//     try {
-//       final response = await _dioClient.post(
-//         ApiEndpoints.markAsRead,
-//         data: {'conversation_id': conversationId},
+      
+//       // 1. Récupérer mes clés privées
+//       final myDhPrivate = await _secureStorage.getDHPrivateKey();
+//       final mySignPrivate = await _secureStorage.getSignPrivateKey();
+      
+//       if (myDhPrivate == null || mySignPrivate == null) {
+//         throw Exception('Clés privées manquantes');
+//       }
+      
+//       // 2. Récupérer les clés publiques de l'expéditeur
+//       final senderKeys = await _getRecipientPublicKeys(message.senderId);
+      
+//       // 3. Déchiffrer avec TON CryptoService
+//       final plaintext = await _cryptoService.decryptMessage(
+//         ciphertextB64: message.encryptedContent,
+//         nonceB64: message.nonce!,
+//         authTagB64: message.authTag!,
+//         signatureB64: message.signature!,
+//         myDhPrivateKeyB64: myDhPrivate,
+//         theirDhPublicKeyB64: senderKeys['dh_public_key']!,
+//         theirSignPublicKeyB64: senderKeys['sign_public_key']!,
 //       );
-//       return response.statusCode == 200;
+      
+//       print('✅ Message déchiffré');
+      
+//       return plaintext;
+      
 //     } catch (e) {
-//       return false;
+//       print('❌ Erreur decryptMessage: $e');
+//       rethrow;
 //     }
 //   }
-
-//   // ==================== HELPERS ====================
-
-//   Future<String> _decryptMessage(Message message) async {
-//     final senderKeys = await _getPublicKeys(message.senderId.toString());
-//     final myDhPrivate = await _storage.getDHPrivateKey();
-
-//     if (senderKeys == null || myDhPrivate == null) {
-//       throw Exception('Clés manquantes pour déchiffrement');
-//     }
-
-//     return await _crypto.decryptMessage(
-//       ciphertextB64: message.encryptedContent!['ciphertext'],
-//       nonceB64: message.encryptedContent!['nonce'],
-//       authTagB64: message.encryptedContent!['auth_tag'],
-//       signatureB64: message.encryptedContent!['signature'],
-//       myDhPrivateKeyB64: myDhPrivate,
-//       theirDhPublicKeyB64: senderKeys['dh_public_key']!,
-//       theirSignPublicKeyB64: senderKeys['sign_public_key']!,
-//     );
-//   }
-
-//   Future<Map<String, String>?> _getPublicKeys(String userId) async {
+  
+//   /// Récupérer les clés publiques d'un utilisateur
+//   Future<Map<String, String>> _getRecipientPublicKeys(String userId) async {
 //     try {
-//       final response = await _dioClient.get('/api/users/$userId/public-keys/');
+//       final response = await _dioClient.privateDio.get(
+//         ApiEndpoints.getPublicKeys(userId),
+//       );
       
 //       if (response.statusCode == 200) {
-//         final data = response.data;
+//         final data = response.data['data'] as Map<String, dynamic>;
 //         return {
-//           'dh_public_key': data['dh_public_key'],
-//           'sign_public_key': data['sign_public_key'],
+//           'dh_public_key': data['dh_public_key'] as String,
+//           'sign_public_key': data['sign_public_key'] as String,
 //         };
+//       } else {
+//         throw Exception('Erreur récupération clés: ${response.statusCode}');
 //       }
-//       return null;
+      
 //     } catch (e) {
-//       print('❌ _getPublicKeys: $e');
-//       return null;
+//       print('❌ Erreur _getRecipientPublicKeys: $e');
+//       rethrow;
 //     }
 //   }
-
-//   List<dynamic> _extractList(dynamic data) {
-//     if (data is Map) {
-//       return data['results'] ?? data['data'] ?? [];
-//     }
-//     if (data is List) {
-//       return data;
-//     }
-//     return [];
+  
+//   // ═══════════════════════════════════════════════════════════════
+//   // WEBSOCKET ACTIONS
+//   // ═══════════════════════════════════════════════════════════════
+  
+//   /// Rejoindre une conversation (WebSocket)
+//   void joinConversation(String conversationId) {
+//     _wsService.joinConversation(conversationId);
+//   }
+  
+//   /// Envoyer indicateur de saisie
+//   void sendTypingIndicator(String conversationId, bool isTyping) {
+//     _wsService.sendTyping(conversationId, isTyping);
 //   }
 // }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// // // lib/data/services/message_service.dart
-// // import 'dart:convert';
-// // import 'package:flutter/material.dart';
-// // import 'package:get/get.dart' hide FormData, MultipartFile;
-// // import 'package:dio/dio.dart';
-// // import 'package:cryptography/cryptography.dart';
-// // import '../models/conversation.dart';
-// // import '../models/message.dart';
-// // import '../api/dio_client.dart';
-// // import '../api/api_endpoints.dart';
-// // import 'secure_storage_service.dart';
-// // import '../../core/shared/environment.dart';
-
-// // class MessageService extends GetxService {
-// //   late final DioClient _dioClient;
-// //   late final SecureStorageService _storage;
-
-// //   final _x25519 = X25519();
-// //   final _ed25519 = Ed25519();
-// //   final _aesGcm = AesGcm.with256bits();
-// //   final _sha256 = Sha256();
-
-// //   @override
-// //   void onInit() {
-// //     super.onInit();
-// //     _dioClient = Get.find<DioClient>();
-// //     _storage = Get.find<SecureStorageService>();
-// //   }
-
-// //   // ========================================
-// //   // CONVERSATIONS
-// //   // ========================================
-
-// //   Future<List<Conversation>?> getConversations({int page = 1}) async {
-// //     try {
-// //       final response = await _dioClient.get(
-// //         ApiEndpoints.conversations,
-// //         queryParameters: {'page': page},
-// //       );
-// //       if (response.statusCode == 200) {
-// //         final dynamic rawData = response.data;
-// //         List<dynamic> listData;
-// //         if (rawData is Map) {
-// //           listData = rawData['results'] ?? rawData['data'] ?? [];
-// //         } else if (rawData is List) {
-// //           listData = rawData;
-// //         } else {
-// //           listData = [];
-// //         }
-// //         return listData.map((json) => Conversation.fromJson(json)).toList();
-// //       }
-// //       return null;
-// //     } catch (e) {
-// //       if (AppEnvironment.enableLogs) print('❌ getConversations: $e');
-// //       return null;
-// //     }
-// //   }
-
-// //   /// ✅ Crée une conversation DIRECTE
-// //   Future<Conversation?> createDirectConversation(int contactUserId) async {
-// //     try {
-// //       final response = await _dioClient.post(
-// //         ApiEndpoints.createConversation,
-// //         data: {
-// //           'contact_user_id': contactUserId,
-// //           'is_group': false,
-// //         },
-// //       );
-// //       if (response.statusCode == 201 || response.statusCode == 200) {
-// //         return Conversation.fromJson(response.data);
-// //       }
-// //       return null;
-// //     } on DioException catch (e) {
-// //       if (e.response?.statusCode == 400 || e.response?.statusCode == 404) {
-// //         Get.snackbar(
-// //           "❌ Indisponible",
-// //           "Cet utilisateur n'a pas encore activé son compte de messagerie sécurisée.",
-// //           snackPosition: SnackPosition.BOTTOM,
-// //           backgroundColor: Colors.orange,
-// //           colorText: Colors.white,
-// //         );
-// //       }
-// //       return null;
-// //     } catch (e) {
-// //       return null;
-// //     }
-// //   }
-
-// //   // ========================================
-// //   // MESSAGES + CHIFFREMENT E2E
-// //   // ========================================
-
-// //   /// ✅ ENVOIE UN MESSAGE CHIFFRÉ
-// //   Future<Message?> sendMessage({
-// //     required int conversationId,
-// //     required String content,
-// //     required String recipientUserId,
-// //   }) async {
-// //     try {
-// //       final recipientKeys = await _getPublicKeys(recipientUserId);
-// //       if (recipientKeys == null) {
-// //         Get.snackbar(
-// //           "❌ Erreur",
-// //           "Clés publiques du destinataire introuvables",
-// //           snackPosition: SnackPosition.BOTTOM,
-// //         );
-// //         return null;
-// //       }
-      
-// //       final encrypted = await _encryptMessage(
-// //         content, 
-// //         recipientKeys['dh_public_key']!
-// //       );
-      
-// //       // ✅ CORRECTION: Indentation correcte
-// //       final response = await _dioClient.post(
-// //         ApiEndpoints.sendMessage,
-// //         data: {
-// //           'conversation_id': conversationId,
-// //           'type': 'text',
-// //           'ciphertext': encrypted['ciphertext'],
-// //           'nonce': encrypted['nonce'],
-// //           'auth_tag': encrypted['auth_tag'],
-// //           'signature': encrypted['signature'],
-// //         },
-// //       );
-
-// //       if (response.statusCode == 201 || response.statusCode == 200) {
-// //         return Message.fromJson(response.data).copyWith(content: content);
-// //       }
-// //       return null;
-// //     } catch (e) {
-// //       if (AppEnvironment.enableLogs) print('❌ sendMessage: $e');
-// //       Get.snackbar(
-// //         "❌ Échec",
-// //         "Impossible d'envoyer le message",
-// //         snackPosition: SnackPosition.BOTTOM,
-// //       );
-// //       return null;
-// //     }
-// //   }
-
-// //   Future<List<Message>?> getMessages(
-// //     int conversationId, {
-// //     int page = 1,
-// //     int pageSize = 50,
-// //   }) async {
-// //     try {
-// //       final response = await _dioClient.get(
-// //         ApiEndpoints.getMessagesByConversation(conversationId),
-// //         queryParameters: {'page': page, 'page_size': pageSize},
-// //       );
-      
-// //       if (response.statusCode == 200) {
-// //         // ✅ CORRECTION: Meilleure gestion de la réponse
-// //         final dynamic rawData = response.data;
-// //         final List<dynamic> data = rawData is Map 
-// //             ? (rawData['results'] ?? rawData['data'] ?? [])
-// //             : (rawData is List ? rawData : []);
-        
-// //         final decryptedMessages = <Message>[];
-// //         for (var json in data) {
-// //           try {
-// //             final message = Message.fromJson(json);
-// //             if (message.encryptedContent != null) {
-// //               final decryptedContent = await _decryptMessage(message);
-// //               decryptedMessages.add(message.copyWith(content: decryptedContent));
-// //             } else {
-// //               decryptedMessages.add(message);
-// //             }
-// //           } catch (e) {
-// //             decryptedMessages.add(
-// //               Message.fromJson(json).copyWith(
-// //                 content: '🔒 Impossible de déchiffrer'
-// //               ),
-// //             );
-// //           }
-// //         }
-// //         return decryptedMessages;
-// //       }
-// //       return null;
-// //     } catch (e) {
-// //       if (AppEnvironment.enableLogs) print('❌ getMessages: $e');
-// //       return null;
-// //     }
-// //   }
-
-// //   // ========================================
-// //   // CRYPTOGRAPHIE (INTERNE)
-// //   // ========================================
-
-// //   Future<Map<String, String>> _encryptMessage(
-// //     String plaintext, 
-// //     String recipientDhPubKeyB64
-// //   ) async {
-// //     final myDhPrivKeyB64 = await _storage.getDHPrivateKey();
-// //     final mySignPrivKeyB64 = await _storage.getSignPrivateKey();
-    
-// //     if (myDhPrivKeyB64 == null || mySignPrivKeyB64 == null) {
-// //       throw Exception('Clés privées manquantes dans le stockage sécurisé');
-// //     }
-
-// //     final sharedSecret = await _x25519.sharedSecretKey(
-// //       keyPair: SimpleKeyPairData(
-// //         base64Decode(myDhPrivKeyB64),
-// //         publicKey: SimplePublicKey([], type: KeyPairType.x25519),
-// //         type: KeyPairType.x25519,
-// //       ),
-// //       remotePublicKey: SimplePublicKey(
-// //         base64Decode(recipientDhPubKeyB64),
-// //         type: KeyPairType.x25519,
-// //       ),
-// //     );
-
-// //     final hkdf = Hkdf(hmac: Hmac(_sha256), outputLength: 32);
-// //     final aesKey = await hkdf.deriveKey(
-// //       secretKey: sharedSecret,
-// //       nonce: utf8.encode('SecureChat-v1'),
-// //       info: utf8.encode('message-encryption'),
-// //     );
-
-// //     final secretBox = await _aesGcm.encrypt(
-// //       utf8.encode(plaintext), 
-// //       secretKey: aesKey
-// //     );
-    
-// //     final ciphertextHash = await _sha256.hash(secretBox.cipherText);
-
-// //     final signature = await _ed25519.sign(
-// //       ciphertextHash.bytes,
-// //       keyPair: SimpleKeyPairData(
-// //         base64Decode(mySignPrivKeyB64),
-// //         publicKey: SimplePublicKey([], type: KeyPairType.ed25519),
-// //         type: KeyPairType.ed25519,
-// //       ),
-// //     );
-
-// //     return {
-// //       'ciphertext': base64Encode(secretBox.cipherText),
-// //       'nonce': base64Encode(secretBox.nonce),
-// //       'auth_tag': base64Encode(secretBox.mac.bytes),
-// //       'signature': base64Encode(signature.bytes),
-// //     };
-// //   }
-
-// //   Future<String> _decryptMessage(Message message) async {
-// //     final senderKeys = await _getPublicKeys(message.senderId.toString());
-// //     final myDhPrivKeyB64 = await _storage.getDHPrivateKey();
-    
-// //     if (senderKeys == null || myDhPrivKeyB64 == null) {
-// //       throw Exception('Impossible de déchiffrer: clés manquantes');
-// //     }
-
-// //     final sharedSecret = await _x25519.sharedSecretKey(
-// //       keyPair: SimpleKeyPairData(
-// //         base64Decode(myDhPrivKeyB64),
-// //         publicKey: SimplePublicKey([], type: KeyPairType.x25519),
-// //         type: KeyPairType.x25519,
-// //       ),
-// //       remotePublicKey: SimplePublicKey(
-// //         base64Decode(senderKeys['dh_public_key']!),
-// //         type: KeyPairType.x25519,
-// //       ),
-// //     );
-
-// //     final hkdf = Hkdf(hmac: Hmac(_sha256), outputLength: 32);
-// //     final aesKey = await hkdf.deriveKey(
-// //       secretKey: sharedSecret,
-// //       nonce: utf8.encode('SecureChat-v1'),
-// //       info: utf8.encode('message-encryption'),
-// //     );
-
-// //     final secretBox = SecretBox(
-// //       base64Decode(message.encryptedContent!['ciphertext']),
-// //       nonce: base64Decode(message.encryptedContent!['nonce']),
-// //       mac: Mac(base64Decode(message.encryptedContent!['auth_tag'])),
-// //     );
-
-// //     final decrypted = await _aesGcm.decrypt(secretBox, secretKey: aesKey);
-// //     return utf8.decode(decrypted);
-// //   }
-
-// //   Future<Map<String, String>?> _getPublicKeys(String userId) async {
-// //     try {
-// //       final response = await _dioClient.get('/api/users/$userId/public-keys/');
-// //       if (response.statusCode == 200) {
-// //         return {
-// //           'dh_public_key': response.data['dh_public_key'],
-// //           'sign_public_key': response.data['sign_public_key'],
-// //         };
-// //       }
-// //       return null;
-// //     } catch (e) {
-// //       if (AppEnvironment.enableLogs) print('❌ _getPublicKeys: $e');
-// //       return null;
-// //     }
-// //   }
-
-// //   // ========================================
-// //   // ACTIONS COMPLÉMENTAIRES
-// //   // ========================================
-
-// //   Future<bool> markAsRead(int conversationId) async {
-// //     try {
-// //       final response = await _dioClient.post(
-// //         ApiEndpoints.markAsRead,
-// //         data: {'conversation_id': conversationId},
-// //       );
-// //       return response.statusCode == 200;
-// //     } catch (e) {
-// //       return false;
-// //     }
-// //   }
-// // }

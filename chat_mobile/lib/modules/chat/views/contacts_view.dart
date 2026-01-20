@@ -227,7 +227,7 @@ void _showAddContactDialog() {
                     } else {
                       print('❌ User not found');
                       Get.snackbar(
-                        '❌',
+                        '',
                         'Ce numéro n\'utilise pas l\'application',
                         backgroundColor: Colors.orange.withOpacity(0.1),
                         colorText: Colors.orange,

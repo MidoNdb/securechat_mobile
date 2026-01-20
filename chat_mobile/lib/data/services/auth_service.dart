@@ -2,6 +2,7 @@
 
 import 'package:uuid/uuid.dart';
 import 'package:get/get.dart';
+import 'dart:convert';
 import 'secure_storage_service.dart';
 import 'crypto_service.dart';
 import '../models/auth_data.dart';
@@ -50,10 +51,26 @@ class AuthService extends GetxService {
       print('🔐 Génération clés...');
       final keys = await _crypto.generateAllKeys();
 
-      // 3. Hash password
+      // 3. Sauvegarder les clés privées localement
+      await _storage.saveDHPrivateKey(keys['dh_private_key']!);
+      await _storage.saveSignPrivateKey(keys['sign_private_key']!);
+      print('✅ Clés privées sauvegardées localement');
+
+      // 4. Créer backup chiffré des clés privées
+      print('🔐 Création backup chiffré...');
+      final encryptedBackup = await _createEncryptedKeysBackup(
+        dhPrivateKey: keys['dh_private_key']!,
+        signPrivateKey: keys['sign_private_key']!,
+        password: password,
+      );
+      
+      // Sauvegarder le backup localement aussi
+      await _storage.saveEncryptedKeysBackup(encryptedBackup);
+
+      // 5. Hash password
       final hashedPassword = _crypto.hashString(password);
 
-      // 4. Appel API
+      // 6. Appel API
       print('📡 Envoi au serveur...');
       final response = await _dio.postPublic(
         ApiEndpoints.register,
@@ -63,6 +80,7 @@ class AuthService extends GetxService {
           'display_name': username,
           'dh_public_key': keys['dh_public_key']!,
           'sign_public_key': keys['sign_public_key']!,
+          'encrypted_private_keys': encryptedBackup, // Backup envoyé au serveur
           'device_id': deviceId,
           'device_name': await _getDeviceName(),
           'device_type': _getDeviceType(),
@@ -70,7 +88,7 @@ class AuthService extends GetxService {
         },
       );
 
-      // 5. Traitement réponse
+      // 7. Traitement réponse
       if (response.data['success'] == true) {
         final data = response.data['data'];
         
@@ -86,7 +104,7 @@ class AuthService extends GetxService {
         currentUser.value = User.fromJson(data['user']);
         await _storage.saveAuthData(authData);
         
-        print('✅ Inscription réussie');
+        print('✅ Inscription réussie avec backup');
       } else {
         throw Exception(response.data['error']['message'] ?? 'Erreur inconnue');
       }
@@ -101,100 +119,413 @@ class AuthService extends GetxService {
   }
 
   // ==================== LOGIN ====================
-  Future<Map<String, dynamic>> login({
-    required String phoneNumber,
-    required String password,
-    String? newDhPublicKey,
-    String? newSignPublicKey,
-    bool confirmedKeyRegeneration = false,
-  }) async {
-    try {
-      isLoading.value = true;
-      errorMessage.value = '';
+  // Future<Map<String, dynamic>> login({
+  //   required String phoneNumber,
+  //   required String password,
+  //   String? newDhPublicKey,
+  //   String? newSignPublicKey,
+  //   bool confirmedKeyRegeneration = false,
+  // }) async {
+  //   try {
+  //     isLoading.value = true;
+  //     errorMessage.value = '';
       
-      print('🔑 Connexion...');
+  //     print('🔑 Connexion...');
       
-      String? deviceId = await _storage.getDeviceId();
-      if (deviceId == null) {
-        deviceId = const Uuid().v4();
-        await _storage.saveDeviceId(deviceId);
-      }
+  //     String? deviceId = await _storage.getDeviceId();
+  //     if (deviceId == null) {
+  //       deviceId = const Uuid().v4();
+  //       await _storage.saveDeviceId(deviceId);
+  //     }
 
-      final hashedPassword = _crypto.hashString(password);
+  //     // Vérifier si on a déjà les clés localement
+  //     final hasLocalKeys = await _storage.hasPrivateKeys();
+  //     print('📱 Clés locales: ${hasLocalKeys ? "✅ présentes" : "❌ absentes"}');
 
-      final response = await _dio.postPublic(
-        ApiEndpoints.login,
-        data: {
-          'phone_number': phoneNumber,
-          'password': hashedPassword,
-          'device_id': deviceId,
-          'device_name': await _getDeviceName(),
-          'device_type': _getDeviceType(),
-          if (newDhPublicKey != null) 'new_dh_public_key': newDhPublicKey,
-          if (newSignPublicKey != null) 'new_sign_public_key': newSignPublicKey,
-          'confirmed_key_regeneration': confirmedKeyRegeneration,
-        },
+  //     final hashedPassword = _crypto.hashString(password);
+
+  //     final response = await _dio.postPublic(
+  //       ApiEndpoints.login,
+  //       data: {
+  //         'phone_number': phoneNumber,
+  //         'password': hashedPassword,
+  //         'device_id': deviceId,
+  //         'device_name': await _getDeviceName(),
+  //         'device_type': _getDeviceType(),
+  //         if (newDhPublicKey != null) 'new_dh_public_key': newDhPublicKey,
+  //         if (newSignPublicKey != null) 'new_sign_public_key': newSignPublicKey,
+  //         'confirmed_key_regeneration': confirmedKeyRegeneration,
+  //       },
+  //     );
+
+  //     // Cas 1: Nouveau device détecté par le serveur
+  //     if (response.data['requires_key_regeneration'] == true) {
+  //       print('⚠️ Nouveau device - Options de récupération');
+        
+  //       // Vérifier si un backup existe sur le serveur
+  //       final hasBackup = await _checkBackupExists();
+        
+  //       return {
+  //         'requires_key_regeneration': true,
+  //         'has_backup': hasBackup,
+  //         'message': response.data['message'],
+  //         'warning': response.data['warning'],
+  //         'old_device': response.data['old_device'],
+  //       };
+  //     }
+
+  //     if (response.data['success'] == true) {
+  //       final data = response.data['data'];
+        
+  //       await _storage.saveTokens(
+  //         data['tokens']['access'],
+  //         data['tokens']['refresh'],
+  //       );
+  //       await _storage.saveDeviceId(deviceId);
+        
+  //       currentUser.value = User.fromJson(data['user']);
+  //       await _storage.saveUserId(currentUser.value!.userId);
+        
+  //       // Cas 2: Clés locales manquantes mais connexion réussie
+  //       if (!hasLocalKeys) {
+  //         print('⚠️ Clés locales manquantes - Récupération nécessaire');
+  //         return {
+  //           'success': true,
+  //           'requires_key_recovery': true,
+  //           'message': 'Clés privées manquantes localement',
+  //         };
+  //       }
+        
+  //       print('✅ Connexion réussie');
+  //       return {
+  //         'success': true,
+  //         'keys_regenerated': data['keys_regenerated'] ?? false,
+  //       };
+  //     } else {
+  //       throw Exception(response.data['error']['message'] ?? 'Erreur inconnue');
+  //     }
+
+  //   } catch (e) {
+  //     print('❌ Erreur: $e');
+  //     errorMessage.value = e.toString();
+  //     rethrow;
+  //   } finally {
+  //     isLoading.value = false;
+  //   }
+  // }
+
+  // ==================== LOGIN ====================
+Future<Map<String, dynamic>> login({
+  required String phoneNumber,
+  required String password,
+  String? newDhPublicKey,
+  String? newSignPublicKey,
+  bool confirmedKeyRegeneration = false,
+}) async {
+  try {
+    isLoading.value = true;
+    errorMessage.value = '';
+    
+    print('🔑 Connexion...');
+    
+    String? deviceId = await _storage.getDeviceId();
+    if (deviceId == null) {
+      deviceId = const Uuid().v4();
+      await _storage.saveDeviceId(deviceId);
+    }
+
+    // Vérifier si on a déjà les clés localement
+    final hasLocalKeys = await _storage.hasPrivateKeys();
+    print('📱 Clés locales: ${hasLocalKeys ? "✅ présentes" : "❌ absentes"}');
+
+    final hashedPassword = _crypto.hashString(password);
+
+    final response = await _dio.postPublic(
+      ApiEndpoints.login,
+      data: {
+        'phone_number': phoneNumber,
+        'password': hashedPassword,
+        'device_id': deviceId,
+        'device_name': await _getDeviceName(),
+        'device_type': _getDeviceType(),
+        if (newDhPublicKey != null) 'new_dh_public_key': newDhPublicKey,
+        if (newSignPublicKey != null) 'new_sign_public_key': newSignPublicKey,
+        'confirmed_key_regeneration': confirmedKeyRegeneration,
+      },
+    );
+
+    if (response.data['success'] == true) {
+      final data = response.data['data'];
+      
+      await _storage.saveTokens(
+        data['tokens']['access'],
+        data['tokens']['refresh'],
       );
-
-      if (response.data['requires_key_regeneration'] == true) {
-        print('⚠️ Nouveau device - Régénération requise');
-        return {
-          'requires_key_regeneration': true,
-          'message': response.data['message'],
-          'warning': response.data['warning'],
-          'old_device': response.data['old_device'],
-        };
-      }
-
-      if (response.data['success'] == true) {
-        final data = response.data['data'];
-        
-        await _storage.saveTokens(
-          data['tokens']['access'],
-          data['tokens']['refresh'],
-        );
-        await _storage.saveDeviceId(deviceId);
-        
-        currentUser.value = User.fromJson(data['user']);
-        await _storage.saveUserId(currentUser.value!.userId);
-        
-        final keysRegenerated = data['keys_regenerated'] ?? false;
-        
-        if (!keysRegenerated) {
-          final hasDhKey = await _storage.hasDHPrivateKey();
-          final hasSignKey = await _storage.hasSignPrivateKey();
-          
-          if (!hasDhKey || !hasSignKey) {
-            print('⚠️ Clés locales manquantes');
-            return {
-              'requires_key_regeneration': true,
-              'message': 'Clés privées manquantes',
-              'warning': 'Régénération requise',
-            };
-          }
-        }
-        
-        print('✅ Connexion réussie');
+      await _storage.saveDeviceId(deviceId);
+      
+      currentUser.value = User.fromJson(data['user']);
+      await _storage.saveUserId(currentUser.value!.userId);
+      
+      final hasBackup = data['has_backup'] == true;
+      print('📦 Backup serveur: ${hasBackup ? "✅ disponible" : "❌ absent"}');
+      
+      // Cas 1: Clés locales présentes → Tout va bien
+      if (hasLocalKeys) {
+        print('✅ Connexion réussie avec clés locales');
         return {
           'success': true,
-          'keys_regenerated': keysRegenerated,
         };
-      } else {
-        throw Exception(response.data['error']['message'] ?? 'Erreur inconnue');
       }
+      
+      // Cas 2: Pas de clés locales + Backup disponible → Récupération
+      if (hasBackup) {
+        print('⚠️ Clés locales manquantes - Récupération backup...');
+        return {
+          'success': true,
+          'requires_key_recovery': true,
+          'has_backup': true,
+        };
+      }
+      
+      // Cas 3: Pas de clés locales + Pas de backup → Régénération obligatoire
+      print('⚠️ Clés locales ET backup manquants - Régénération nécessaire');
+      return {
+        'success': true,
+        'requires_key_regeneration': true,
+        'has_backup': false,
+        'message': 'Aucune clé disponible. Régénération nécessaire.',
+      };
+      
+    } else {
+      throw Exception(response.data['error']['message'] ?? 'Erreur inconnue');
+    }
 
+  } catch (e) {
+    print('❌ Erreur: $e');
+    errorMessage.value = e.toString();
+    rethrow;
+  } finally {
+    isLoading.value = false;
+  }
+}
+
+// ==================== RÉGÉNÉRER CLÉS ET CRÉER BACKUP ====================
+Future<bool> regenerateKeysAndCreateBackup(String password) async {
+  try {
+    print('🔄 Régénération clés + création backup...');
+    
+    // 1. Générer nouvelles clés
+    final keys = await _crypto.generateAllKeys();
+    
+    // 2. Sauvegarder localement
+    await _storage.saveDHPrivateKey(keys['dh_private_key']!);
+    await _storage.saveSignPrivateKey(keys['sign_private_key']!);
+    
+    // 3. Créer backup chiffré
+    final encryptedBackup = await _createEncryptedKeysBackup(
+      dhPrivateKey: keys['dh_private_key']!,
+      signPrivateKey: keys['sign_private_key']!,
+      password: password,
+    );
+    
+    // 4. Sauvegarder backup localement
+    await _storage.saveEncryptedKeysBackup(encryptedBackup);
+    
+    // 5. Uploader backup sur serveur
+    final uploadSuccess = await _uploadBackupToServer(encryptedBackup);
+    
+    if (!uploadSuccess) {
+      print('⚠️ Échec upload backup, mais clés locales OK');
+    }
+    
+    // 6. Mettre à jour les clés publiques sur le serveur
+    final updateSuccess = await _updatePublicKeysOnServer(
+      keys['dh_public_key']!,
+      keys['sign_public_key']!,
+    );
+    
+    if (!updateSuccess) {
+      print('⚠️ Échec mise à jour clés publiques');
+      return false;
+    }
+    
+    print('✅ Régénération + backup créés avec succès');
+    return true;
+    
+  } catch (e) {
+    print('❌ Erreur regenerateKeysAndCreateBackup: $e');
+    return false;
+  }
+}
+
+/// Upload backup sur serveur
+Future<bool> _uploadBackupToServer(String encryptedBackup) async {
+  try {
+    final response = await _dio.post(
+      ApiEndpoints.uploadEncryptedKeys,
+      data: {'encrypted_private_keys': encryptedBackup},
+    );
+    
+    return response.data['success'] == true;
+  } catch (e) {
+    print('❌ Erreur upload backup: $e');
+    return false;
+  }
+}
+
+/// Mettre à jour les clés publiques sur le serveur
+Future<bool> _updatePublicKeysOnServer(String dhPublicKey, String signPublicKey) async {
+  try {
+    final response = await _dio.post(
+      ApiEndpoints.uploadPublicKeys,
+      data: {
+        'dh_public_key': dhPublicKey,
+        'sign_public_key': signPublicKey,
+      },
+    );
+    
+    return response.data['success'] == true;
+  } catch (e) {
+    print('❌ Erreur mise à jour clés publiques: $e');
+    return false;
+  }
+}
+
+  // ==================== BACKUP DES CLÉS ====================
+  
+  /// Créer un backup chiffré des clés privées avec le mot de passe
+  Future<String> _createEncryptedKeysBackup({
+    required String dhPrivateKey,
+    required String signPrivateKey,
+    required String password,
+  }) async {
+    try {
+      // Combiner les deux clés privées
+      final keysJson = jsonEncode({
+        'dh_private_key': dhPrivateKey,
+        'sign_private_key': signPrivateKey,
+        'created_at': DateTime.now().toIso8601String(),
+      });
+      
+      // Chiffrer avec le mot de passe (utilise PBKDF2 en interne)
+      final encrypted = await _crypto.encryptWithPassword(
+        plaintext: keysJson,
+        password: password,
+      );
+      
+      return encrypted;
     } catch (e) {
-      print('❌ Erreur: $e');
-      errorMessage.value = e.toString();
+      print('❌ Erreur création backup: $e');
       rethrow;
-    } finally {
-      isLoading.value = false;
     }
   }
 
-  // ==================== RÉGÉNÉRER CLÉS ====================
+  /// Récupérer les clés depuis le backup chiffré
+  Future<Map<String, String>> _decryptKeysBackup({
+    required String encryptedBackup,
+    required String password,
+  }) async {
+    try {
+      // Déchiffrer avec le mot de passe
+      final decrypted = await _crypto.decryptWithPassword(
+        ciphertext: encryptedBackup,
+        password: password,
+      );
+      
+      final keysData = jsonDecode(decrypted) as Map<String, dynamic>;
+      
+      return {
+        'dh_private_key': keysData['dh_private_key'] as String,
+        'sign_private_key': keysData['sign_private_key'] as String,
+      };
+    } catch (e) {
+      print('❌ Erreur déchiffrement backup: $e');
+      rethrow;
+    }
+  }
+
+  /// Vérifier si un backup existe sur le serveur
+  Future<bool> _checkBackupExists() async {
+    try {
+      final response = await _dio.get(ApiEndpoints.downloadEncryptedKeys);
+      return response.data['success'] == true && 
+             response.data['data']?['encrypted_private_keys'] != null;
+    } catch (e) {
+      print('⚠️ Pas de backup disponible: $e');
+      return false;
+    }
+  }
+
+  /// Récupérer le backup depuis le serveur et restaurer les clés
+  Future<bool> recoverKeysFromBackup(String password) async {
+    try {
+      print('🔄 Récupération backup serveur...');
+      
+      final response = await _dio.get(ApiEndpoints.downloadEncryptedKeys);
+      
+      if (response.data['success'] == true) {
+        final encryptedBackup = response.data['data']['encrypted_private_keys'] as String;
+        
+        print('🔓 Déchiffrement backup...');
+        final keys = await _decryptKeysBackup(
+          encryptedBackup: encryptedBackup,
+          password: password,
+        );
+        
+        // Sauvegarder les clés localement
+        await _storage.saveDHPrivateKey(keys['dh_private_key']!);
+        await _storage.saveSignPrivateKey(keys['sign_private_key']!);
+        await _storage.saveEncryptedKeysBackup(encryptedBackup);
+        
+        print('✅ Clés récupérées et sauvegardées');
+        return true;
+      }
+      
+      return false;
+    } catch (e) {
+      print('❌ Erreur récupération backup: $e');
+      return false;
+    }
+  }
+
+  /// Envoyer/Mettre à jour le backup sur le serveur
+  Future<bool> uploadKeysBackup(String password) async {
+    try {
+      final dhKey = await _storage.getDHPrivateKey();
+      final signKey = await _storage.getSignPrivateKey();
+      
+      if (dhKey == null || signKey == null) {
+        print('❌ Clés privées manquantes');
+        return false;
+      }
+      
+      final encryptedBackup = await _createEncryptedKeysBackup(
+        dhPrivateKey: dhKey,
+        signPrivateKey: signKey,
+        password: password,
+      );
+      
+      final response = await _dio.post(
+        ApiEndpoints.uploadEncryptedKeys,
+        data: {'encrypted_private_keys': encryptedBackup},
+      );
+      
+      if (response.data['success'] == true) {
+        await _storage.saveEncryptedKeysBackup(encryptedBackup);
+        print('✅ Backup uploadé');
+        return true;
+      }
+      
+      return false;
+    } catch (e) {
+      print('❌ Erreur upload backup: $e');
+      return false;
+    }
+  }
+
+  // ==================== RÉGÉNÉRER CLÉS (dernier recours) ====================
   Future<Map<String, String>> regenerateKeys() async {
-    print('🔄 Régénération clés...');
+    print('🔄 Régénération clés (DERNIER RECOURS)...');
     final keys = await _crypto.generateAllKeys();
     
     await _storage.saveDHPrivateKey(keys['dh_private_key']!);
@@ -271,28 +602,12 @@ class AuthService extends GetxService {
   }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
 // // lib/data/services/auth_service.dart
-// import 'dart:convert';
-// import 'package:crypto/crypto.dart';
+
 // import 'package:uuid/uuid.dart';
 // import 'package:get/get.dart';
-// import 'package:flutter/material.dart';
-// import 'package:cryptography/cryptography.dart';
-// import 'package:device_info_plus/device_info_plus.dart';
-// import 'dart:io';
 // import 'secure_storage_service.dart';
+// import 'crypto_service.dart';
 // import '../models/auth_data.dart';
 // import '../models/user.dart';
 // import '../api/dio_client.dart';
@@ -301,20 +616,18 @@ class AuthService extends GetxService {
 // class AuthService extends GetxService {
 //   late final SecureStorageService _storage;
 //   late final DioClient _dio;
+//   late final CryptoService _crypto;
 
 //   final RxBool isLoading = false.obs;
 //   final Rx<User?> currentUser = Rx<User?>(null);
 //   final RxString errorMessage = ''.obs;
-
-//   // Algorithmes crypto modernes
-//   final _x25519 = X25519();
-//   final _ed25519 = Ed25519();
 
 //   @override
 //   void onInit() {
 //     super.onInit();
 //     _storage = Get.find<SecureStorageService>();
 //     _dio = Get.find<DioClient>();
+//     _crypto = CryptoService();
 //   }
 
 //   // ==================== REGISTER ====================
@@ -327,8 +640,9 @@ class AuthService extends GetxService {
 //     try {
 //       isLoading.value = true;
 //       errorMessage.value = '';
-//       print('🚀 Inscription en cours...');
-
+      
+//       print('🚀 Inscription...');
+      
 //       // 1. Device ID
 //       String? deviceId = await _storage.getDeviceId();
 //       if (deviceId == null) {
@@ -336,19 +650,15 @@ class AuthService extends GetxService {
 //         await _storage.saveDeviceId(deviceId);
 //       }
 
-//       // 2. Génération des clés cryptographiques
-//       print('🔐 Génération des clés X25519 + Ed25519...');
-//       final keys = await _generateDHAndSignKeys();
+//       // 2. Génération clés via CryptoService
+//       print('🔐 Génération clés...');
+//       final keys = await _crypto.generateAllKeys();
 
-//       // 3. Hash du mot de passe
-//       final hashedPassword = _hashPassword(password);
+//       // 3. Hash password
+//       final hashedPassword = _crypto.hashString(password);
 
-//       // 4. Récupération des infos device
-//       final deviceName = await _getDeviceName();
-//       final deviceType = await _getDeviceType();
-
-//       // 5. Appel API
-//       print('📡 Envoi des données au serveur...');
+//       // 4. Appel API
+//       print('📡 Envoi au serveur...');
 //       final response = await _dio.postPublic(
 //         ApiEndpoints.register,
 //         data: {
@@ -358,17 +668,16 @@ class AuthService extends GetxService {
 //           'dh_public_key': keys['dh_public_key']!,
 //           'sign_public_key': keys['sign_public_key']!,
 //           'device_id': deviceId,
-//           'device_name': deviceName,
-//           'device_type': deviceType,
+//           'device_name': await _getDeviceName(),
+//           'device_type': _getDeviceType(),
 //           if (email != null && email.isNotEmpty) 'email': email,
 //         },
 //       );
 
-//       // 6. Traitement de la réponse
+//       // 5. Traitement réponse
 //       if (response.data['success'] == true) {
 //         final data = response.data['data'];
         
-//         // Sauvegarde des données d'authentification
 //         final authData = AuthData(
 //           accessToken: data['tokens']['access'],
 //           refreshToken: data['tokens']['refresh'],
@@ -377,34 +686,18 @@ class AuthService extends GetxService {
 //           dhPrivateKey: keys['dh_private_key']!,
 //           signPrivateKey: keys['sign_private_key']!,
 //         );
-        
+
 //         currentUser.value = User.fromJson(data['user']);
 //         await _storage.saveAuthData(authData);
         
-//         print('✅ Inscription réussie !');
-        
-//         Get.snackbar(
-//           '✅ Succès',
-//           'Inscription réussie ! Bienvenue ${username}',
-//           snackPosition: SnackPosition.BOTTOM,
-//           backgroundColor: Colors.green,
-//           colorText: Colors.white,
-//         );
+//         print('✅ Inscription réussie');
 //       } else {
-//         throw Exception(response.data['error']?['message'] ?? 'Erreur inconnue');
+//         throw Exception(response.data['error']['message'] ?? 'Erreur inconnue');
 //       }
+
 //     } catch (e) {
-//       print('❌ Erreur inscription: $e');
-//       errorMessage.value = _formatErrorMessage(e);
-      
-//       Get.snackbar(
-//         '❌ Erreur',
-//         errorMessage.value,
-//         snackPosition: SnackPosition.BOTTOM,
-//         backgroundColor: Colors.red,
-//         colorText: Colors.white,
-//       );
-      
+//       print('❌ Erreur: $e');
+//       errorMessage.value = e.toString();
 //       rethrow;
 //     } finally {
 //       isLoading.value = false;
@@ -422,41 +715,33 @@ class AuthService extends GetxService {
 //     try {
 //       isLoading.value = true;
 //       errorMessage.value = '';
-//       print('🔑 Connexion en cours...');
-
-//       // 1. Device ID
+      
+//       print('🔑 Connexion...');
+      
 //       String? deviceId = await _storage.getDeviceId();
 //       if (deviceId == null) {
 //         deviceId = const Uuid().v4();
 //         await _storage.saveDeviceId(deviceId);
 //       }
 
-//       // 2. Hash du mot de passe
-//       final hashedPassword = _hashPassword(password);
+//       final hashedPassword = _crypto.hashString(password);
 
-//       // 3. Récupération des infos device
-//       final deviceName = await _getDeviceName();
-//       final deviceType = await _getDeviceType();
-
-//       // 4. Appel API
-//       print('📡 Authentification...');
 //       final response = await _dio.postPublic(
 //         ApiEndpoints.login,
 //         data: {
 //           'phone_number': phoneNumber,
 //           'password': hashedPassword,
 //           'device_id': deviceId,
-//           'device_name': deviceName,
-//           'device_type': deviceType,
+//           'device_name': await _getDeviceName(),
+//           'device_type': _getDeviceType(),
 //           if (newDhPublicKey != null) 'new_dh_public_key': newDhPublicKey,
 //           if (newSignPublicKey != null) 'new_sign_public_key': newSignPublicKey,
 //           'confirmed_key_regeneration': confirmedKeyRegeneration,
 //         },
 //       );
 
-//       // 5. Vérifier si régénération de clés requise
 //       if (response.data['requires_key_regeneration'] == true) {
-//         print('⚠️ Nouveau device détecté - Régénération de clés requise');
+//         print('⚠️ Nouveau device - Régénération requise');
 //         return {
 //           'requires_key_regeneration': true,
 //           'message': response.data['message'],
@@ -465,11 +750,9 @@ class AuthService extends GetxService {
 //         };
 //       }
 
-//       // 6. Traitement réponse succès
 //       if (response.data['success'] == true) {
 //         final data = response.data['data'];
         
-//         // Sauvegarde des tokens
 //         await _storage.saveTokens(
 //           data['tokens']['access'],
 //           data['tokens']['refresh'],
@@ -478,54 +761,35 @@ class AuthService extends GetxService {
         
 //         currentUser.value = User.fromJson(data['user']);
 //         await _storage.saveUserId(currentUser.value!.userId);
-
-//         // Vérifier si les clés ont été régénérées
+        
 //         final keysRegenerated = data['keys_regenerated'] ?? false;
         
 //         if (!keysRegenerated) {
-//           // Vérifier si les clés privées locales existent
 //           final hasDhKey = await _storage.hasDHPrivateKey();
 //           final hasSignKey = await _storage.hasSignPrivateKey();
           
 //           if (!hasDhKey || !hasSignKey) {
-//             print('⚠️ Clés privées locales manquantes');
+//             print('⚠️ Clés locales manquantes');
 //             return {
 //               'requires_key_regeneration': true,
 //               'message': 'Clés privées manquantes',
-//               'warning': 'Vous devez régénérer vos clés pour continuer',
+//               'warning': 'Régénération requise',
 //             };
 //           }
 //         }
         
-//         print('✅ Connexion réussie !');
-        
-//         Get.snackbar(
-//           '✅ Connecté',
-//           'Bienvenue ${currentUser.value?.displayName ?? ""}',
-//           snackPosition: SnackPosition.BOTTOM,
-//           backgroundColor: Colors.green,
-//           colorText: Colors.white,
-//         );
-        
+//         print('✅ Connexion réussie');
 //         return {
 //           'success': true,
 //           'keys_regenerated': keysRegenerated,
 //         };
 //       } else {
-//         throw Exception(response.data['error']?['message'] ?? 'Erreur inconnue');
+//         throw Exception(response.data['error']['message'] ?? 'Erreur inconnue');
 //       }
+
 //     } catch (e) {
-//       print('❌ Erreur connexion: $e');
-//       errorMessage.value = _formatErrorMessage(e);
-      
-//       Get.snackbar(
-//         '❌ Erreur',
-//         errorMessage.value,
-//         snackPosition: SnackPosition.BOTTOM,
-//         backgroundColor: Colors.red,
-//         colorText: Colors.white,
-//       );
-      
+//       print('❌ Erreur: $e');
+//       errorMessage.value = e.toString();
 //       rethrow;
 //     } finally {
 //       isLoading.value = false;
@@ -534,14 +798,11 @@ class AuthService extends GetxService {
 
 //   // ==================== RÉGÉNÉRER CLÉS ====================
 //   Future<Map<String, String>> regenerateKeys() async {
-//     print('🔄 Régénération des clés cryptographiques...');
-//     final keys = await _generateDHAndSignKeys();
+//     print('🔄 Régénération clés...');
+//     final keys = await _crypto.generateAllKeys();
     
-//     // Sauvegarde locale des clés privées
 //     await _storage.saveDHPrivateKey(keys['dh_private_key']!);
 //     await _storage.saveSignPrivateKey(keys['sign_private_key']!);
-    
-//     print('✅ Clés régénérées avec succès');
     
 //     return {
 //       'dh_public_key': keys['dh_public_key']!,
@@ -552,13 +813,11 @@ class AuthService extends GetxService {
 //   // ==================== LOGOUT ====================
 //   Future<void> logout() async {
 //     try {
-//       isLoading.value = true;
-      
 //       final accessToken = await _storage.getAccessToken();
+      
 //       if (accessToken != null) {
 //         try {
-//           await _dio.post(ApiEndpoints.logout, data: {});
-//           print('✅ Logout API réussi');
+//           await _dio.post(ApiEndpoints.logout);
 //         } catch (e) {
 //           print('⚠️ Erreur logout API: $e');
 //         }
@@ -568,15 +827,7 @@ class AuthService extends GetxService {
 //     } finally {
 //       await _storage.clearAuth();
 //       currentUser.value = null;
-//       isLoading.value = false;
-      
-//       print('✅ Déconnecté localement');
-      
-//       Get.snackbar(
-//         '👋 À bientôt',
-//         'Vous avez été déconnecté',
-//         snackPosition: SnackPosition.BOTTOM,
-//       );
+//       print('✅ Déconnecté');
 //     }
 //   }
 
@@ -597,107 +848,8 @@ class AuthService extends GetxService {
 //     }
 //   }
 
-//   // ==================== HELPERS CRYPTOGRAPHIE ====================
-  
-//   /// Génère une paire de clés DH (X25519) + Signature (Ed25519)
-//   Future<Map<String, String>> _generateDHAndSignKeys() async {
-//     try {
-//       // 1. Générer clé DH (X25519)
-//       final dhKeyPair = await _x25519.newKeyPair();
-//       final dhPrivateBytes = await dhKeyPair.extractPrivateKeyBytes();
-//       final dhPublicKey = await dhKeyPair.extractPublicKey();
+//   // ==================== HELPERS ====================
 
-//       // 2. Générer clé Signature (Ed25519)
-//       final signKeyPair = await _ed25519.newKeyPair();
-//       final signPrivateBytes = await signKeyPair.extractPrivateKeyBytes();
-//       final signPublicKey = await signKeyPair.extractPublicKey();
-
-//       return {
-//         'dh_public_key': base64Encode(dhPublicKey.bytes),
-//         'dh_private_key': base64Encode(dhPrivateBytes),
-//         'sign_public_key': base64Encode(signPublicKey.bytes),
-//         'sign_private_key': base64Encode(signPrivateBytes),
-//       };
-//     } catch (e) {
-//       print('❌ Erreur génération clés: $e');
-//       rethrow;
-//     }
-//   }
-
-//   /// Hash le mot de passe avec SHA-256
-//   String _hashPassword(String password) {
-//     final bytes = utf8.encode(password);
-//     final digest = sha256.convert(bytes);
-//     return digest.toString();
-//   }
-
-//   // ==================== HELPERS DEVICE INFO ====================
-  
-//   /// Récupère le nom du device
-//   Future<String> _getDeviceName() async {
-//     try {
-//       final DeviceInfoPlugin deviceInfo = DeviceInfoPlugin();
-      
-//       if (Platform.isAndroid) {
-//         final androidInfo = await deviceInfo.androidInfo;
-//         return '${androidInfo.brand} ${androidInfo.model}';
-//       } else if (Platform.isIOS) {
-//         final iosInfo = await deviceInfo.iosInfo;
-//         return '${iosInfo.name} ${iosInfo.model}';
-//       }
-      
-//       return 'Unknown Device';
-//     } catch (e) {
-//       print('⚠️ Erreur récupération device name: $e');
-//       return 'Flutter Device';
-//     }
-//   }
-
-//   /// Récupère le type du device
-//   Future<String> _getDeviceType() async {
-//     try {
-//       if (Platform.isAndroid) {
-//         return 'android';
-//       } else if (Platform.isIOS) {
-//         return 'ios';
-//       } else if (Platform.isWindows) {
-//         return 'windows';
-//       } else if (Platform.isMacOS) {
-//         return 'macos';
-//       } else if (Platform.isLinux) {
-//         return 'linux';
-//       }
-      
-//       return 'unknown';
-//     } catch (e) {
-//       print('⚠️ Erreur récupération device type: $e');
-//       return 'android';
-//     }
-//   }
-
-//   // ==================== HELPERS ERREURS ====================
-  
-//   /// Formate les messages d'erreur
-//   String _formatErrorMessage(dynamic error) {
-//     if (error.toString().contains('SocketException')) {
-//       return 'Pas de connexion Internet. Vérifiez votre réseau.';
-//     } else if (error.toString().contains('TimeoutException')) {
-//       return 'Délai d\'attente dépassé. Réessayez.';
-//     } else if (error.toString().contains('401')) {
-//       return 'Identifiants incorrects.';
-//     } else if (error.toString().contains('404')) {
-//       return 'Compte non trouvé.';
-//     } else if (error.toString().contains('409')) {
-//       return 'Ce numéro est déjà utilisé.';
-//     } else if (error.toString().contains('500')) {
-//       return 'Erreur serveur. Réessayez plus tard.';
-//     }
-    
-//     return error.toString().replaceAll('Exception: ', '');
-//   }
-
-//   // ==================== GETTERS ====================
-  
 //   Future<bool> isAuthenticated() async {
 //     return await _storage.isAuthenticated();
 //   }
@@ -713,4 +865,13 @@ class AuthService extends GetxService {
 //   Future<String?> getUserId() async {
 //     return await _storage.getUserId();
 //   }
+
+//   Future<String> _getDeviceName() async {
+//     return 'Flutter Device';
+//   }
+
+//   String _getDeviceType() {
+//     return 'android';
+//   }
 // }
+

@@ -8,10 +8,11 @@ class ChatBinding extends Bindings {
   @override
   void dependencies() {
     
-    Get.lazyPut<ChatController>(() => ChatController());
+    Get.lazyPut<ChatController>(
+      () => ChatController(),
+      fenix: true,           // ← très utile si on revient souvent sur la page
+    );
     Get.lazyPut<MainShellController>(() => MainShellController());
-    // ❌ NE PAS mettre MessagesController ici
-    // Il est déjà dans InitialBinding (fenix: true)
   }
 }
 

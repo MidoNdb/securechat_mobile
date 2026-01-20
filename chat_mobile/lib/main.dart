@@ -40,6 +40,10 @@ Future<void> initCriticalServices() async {
     await service.init();
     return service;
   }, permanent: true);
+  await Get.putAsync(() async {
+    final service = WebSocketService();
+    return service;
+  }, permanent: true);
   
   // 3. AuthService
   Get.put(AuthService(), permanent: true);
@@ -53,8 +57,7 @@ Future<void> initCriticalServices() async {
   // 6. MessageService (dépend de Storage + DioClient + Crypto)
   Get.put(MessageService(), permanent: true);
   
-  // 7. WebSocketService (dépend de Storage)
-  Get.put(WebSocketService(), permanent: true);
+  
   Get.put(ContactService(), permanent: true);
 }
 

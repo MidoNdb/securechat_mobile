@@ -1,6 +1,6 @@
 // lib/modules/main/views/main_shell_view.dart
 
-import 'package:chat_mobile/modules/chat/views/home_view.dart';
+import 'package:chat_mobile/modules/chat/views/messages_view.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import '../../chat/controllers/main_shell_controller.dart';

@@ -10,11 +10,11 @@ class AppEnvironment {
   static const Environment current = Environment.LOCAL;
 
   // ==================== BASE URLs ====================
-
+ 
   static String get baseUrl {
     switch (current) {
       case Environment.LOCAL:
-        return 'http://10.124.159.64:8000'; // Android Emulator 10.0.2.2 → localhost→ 10.154.160.64
+        return 'http://192.168.100.127:8000'; // Android Emulator 10.0.2.2 → localhost→ 10.154.160.64
       case Environment.STAGING:
         return 'https://staging.securechat.mr';
       case Environment.PRODUCTION:
@@ -25,7 +25,7 @@ class AppEnvironment {
   static String get wsUrl {
     switch (current) {
       case Environment.LOCAL:
-        return 'ws://10.0.2.2:8000'; // ⚠️ Pas de /ws/chat/ ici
+        return 'ws://192.168.100.127:8000'; // ⚠️ Pas de /ws/chat/ ici
       case Environment.STAGING:
         return 'wss://staging.securechat.mr';
       case Environment.PRODUCTION:

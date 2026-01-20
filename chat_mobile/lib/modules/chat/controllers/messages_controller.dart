@@ -21,8 +21,8 @@ class MessagesController extends GetxController {
   final selectedTabIndex = 0.obs;
   final totalUnreadCount = 0.obs;
 
-  int? _currentUserId;
-  int? get currentUserId => _currentUserId;
+  String? _currentUserId;
+  String? get currentUserId => _currentUserId;
 
   @override
   void onInit() {
@@ -30,15 +30,9 @@ class MessagesController extends GetxController {
     initializeMessages();
   }
 
-  // ✅ Tout en async dans le bon ordre
   Future<void> initializeMessages() async {
-    // 1. Charger currentUserId D'ABORD
     await _initCurrentUser();
-    
-    // 2. Charger conversations
     await loadConversations();
-    
-    // 3. WebSocket
     _webSocketService.connect();
     listenToNewMessages();
   }
@@ -48,11 +42,10 @@ class MessagesController extends GetxController {
       final userId = await _storage.getUserId();
       
       if (userId != null) {
-        _currentUserId = int.tryParse(userId);
+        _currentUserId = userId;
         print('👤 Current user ID: $_currentUserId');
       } else {
         print('⚠️ No user ID in storage');
-        // ✅ Fallback: charger depuis API
         await _loadUserIdFromAPI();
       }
     } catch (e) {
@@ -61,27 +54,24 @@ class MessagesController extends GetxController {
     }
   }
 
-// lib/modules/chat/controllers/messages_controller.dart
-
-Future<void> _loadUserIdFromAPI() async {
-  try {
-    final data = await _messageService.getCurrentUser();  // ✅ Appel simplifié
-    
-    if (data != null) {
-      final userIdValue = data['user_id'] ?? data['id'];
+  Future<void> _loadUserIdFromAPI() async {
+    try {
+      final data = await _messageService.getCurrentUser();
       
-      if (userIdValue != null) {
-        _currentUserId = int.tryParse(userIdValue.toString());
-        print('👤 Current user ID from API: $_currentUserId');
+      if (data != null) {
+        final userIdValue = data['user_id'] ?? data['id'];
         
-        // Sauvegarde pour la prochaine fois
-        await _storage.saveUserId(_currentUserId.toString());
+        if (userIdValue != null) {
+          _currentUserId = userIdValue.toString();
+          print('👤 Current user ID from API: $_currentUserId');
+          
+          await _storage.saveUserId(_currentUserId!);
+        }
       }
+    } catch (e) {
+      print('❌ _loadUserIdFromAPI: $e');
     }
-  } catch (e) {
-    print('❌ _loadUserIdFromAPI: $e');
   }
-}
 
   Future<void> loadConversations() async {
     try {
@@ -90,7 +80,90 @@ Future<void> _loadUserIdFromAPI() async {
       final result = await _messageService.getConversations();
       
       if (result != null && result.isNotEmpty) {
-        // Trie par date
+        // ✅ CORRECTION : Déchiffrer le dernier message avec gestion cache
+        for (var conversation in result) {
+          if (conversation.lastMessage != null) {
+            try {
+              final msg = conversation.lastMessage!;
+              String decryptedText;
+              
+              // ✅ SI C'EST NOTRE MESSAGE → Utiliser le cache local
+              if (msg.senderId == _currentUserId) {
+                print('📦 Message de nous-même, recherche dans le cache...');
+                
+                final cached = await _storage.getMessagePlaintext(msg.id);
+                
+                if (cached != null) {
+                  decryptedText = cached;
+                  print('✅ Trouvé dans le cache: "$decryptedText"');
+                } else {
+                  print('⚠️ Cache manquant pour notre message ${msg.id}');
+                  
+                  // Vérifier si message a les champs E2EE
+                  if (msg.nonce == null || msg.authTag == null || msg.signature == null) {
+                    decryptedText = '[Message]';
+                  } else {
+                    // Essayer de déchiffrer quand même
+                    try {
+                      decryptedText = await _messageService.decryptMessage(msg);
+                    } catch (e) {
+                      print('⚠️ Déchiffrement échoué: $e');
+                      decryptedText = '[Message illisible]';
+                    }
+                  }
+                }
+              } 
+              // ✅ SINON → Déchiffrer normalement (message reçu)
+              else {
+                print('📨 Message reçu, déchiffrement...');
+                
+                // Vérifier si le message a les champs E2EE
+                if (msg.nonce == null || msg.authTag == null || msg.signature == null) {
+                  print('⚠️ Champs E2EE manquants');
+                  decryptedText = '[Message]';
+                } else {
+                  try {
+                    decryptedText = await _messageService.decryptMessage(msg);
+                    print('✅ Déchiffré: "$decryptedText"');
+                  } catch (e) {
+                    print('⚠️ Erreur déchiffrement: $e');
+                    
+                    // Gérer les différents types d'erreurs
+                    if (e.toString().contains('Signature invalide')) {
+                      decryptedText = '[Message illisible]';
+                    } else if (e.toString().contains('E2EE fields missing')) {
+                      decryptedText = '[Message]';
+                    } else if (e.toString().contains('SecretBoxAuthenticationError')) {
+                      decryptedText = '[Message illisible]';
+                    } else {
+                      decryptedText = '[Erreur]';
+                    }
+                  }
+                }
+              }
+              
+              // Mettre à jour avec le texte déchiffré
+              final index = result.indexOf(conversation);
+              result[index] = conversation.copyWith(
+                lastMessage: msg.copyWith(
+                  decryptedContent: decryptedText,
+                ),
+              );
+              
+            } catch (e) {
+              print('❌ Erreur traitement dernier message: $e');
+              
+              final index = result.indexOf(conversation);
+              result[index] = conversation.copyWith(
+                lastMessage: conversation.lastMessage!.copyWith(
+                  decryptedContent: '[Erreur]',
+                ),
+              );
+            }
+          }
+        }
+        
+        // Trie par date (plus récent en premier)
         result.sort((a, b) {
           final aDate = a.lastMessageAt ?? a.createdAt;
           final bDate = b.lastMessageAt ?? b.createdAt;
@@ -100,7 +173,7 @@ Future<void> _loadUserIdFromAPI() async {
         conversations.assignAll(result);
         
         print('✅ Loaded ${conversations.length} conversations');
-        print('📋 Conversations: ${conversations.map((c) => c.name ?? c.id).toList()}');
+        print('📋 Conversations: ${conversations.map((c) => '${c.name} (${c.id})').toList()}');
         
         _applyCurrentFilter();
         calculateUnreadCount();
@@ -117,13 +190,12 @@ Future<void> _loadUserIdFromAPI() async {
   }
 
   void openConversation(Conversation conversation) {
-    print('📂 Opening conversation: ${conversation.id}');
+    print('📂 Opening conversation: ${conversation.name} (${conversation.id})');
     
     Get.to(
-      () => ChatView(),
+      () => const ChatView(),
       arguments: {
         'conversation': conversation,
-        'contactName': conversation.name ?? 'Conversation',
       },
       preventDuplicates: true,
     )?.then((_) {
@@ -137,50 +209,59 @@ Future<void> _loadUserIdFromAPI() async {
     required String contactName,
   }) async {
     try {
-      print('🔍 Looking for conversation with: $contactUserId');
+      print('🔍 Looking for conversation with user: $contactUserId');
+      print('   Contact name: $contactName');
       
-      // 1. Cherche conversation existante
       var existing = conversations.firstWhereOrNull((conv) {
         if (conv.isGroup) return false;
-        return conv.participants.any((p) =>
-          p.userId.toString() == contactUserId.toString()
-        );
+        return conv.participants.any((p) => p.userId == contactUserId);
       });
 
       if (existing == null) {
+        print('🔄 Not found locally, reloading conversations...');
         await loadConversations();
+        
         existing = conversations.firstWhereOrNull((conv) {
           if (conv.isGroup) return false;
-          return conv.participants.any((p) =>
-            p.userId.toString() == contactUserId.toString()
-          );
+          return conv.participants.any((p) => p.userId == contactUserId);
         });
       }
 
       if (existing != null) {
-        print('✅ Found existing conversation: ${existing.id}');
-        Get.back();
-        await Future.delayed(const Duration(milliseconds: 100));
-        openConversation(existing);
+        print('✅ Found existing conversation: ${existing.name}');
+        
+        Get.off(
+          () => const ChatView(),
+          arguments: {
+            'conversation': existing,
+          },
+        )?.then((_) {
+          print('🔄 Returned from ChatView - Reloading conversations');
+          loadConversations();
+        });
         return;
       }
 
-      // 2. Crée nouvelle conversation
-      print('📝 Creating new conversation...');
+      print('📝 Creating new conversation with $contactUserId...');
       
       final newConversation = await _messageService.createDirectConversation(
         contactUserId,
       );
 
       if (newConversation != null) {
-        print('✅ Conversation created: ${newConversation.id}');
+        print('✅ Conversation created: ${newConversation.name} (${newConversation.id})');
         
         await loadConversations();
         
-        Get.back();
-        await Future.delayed(const Duration(milliseconds: 100));
-        
-        openConversation(newConversation);
+        Get.off(
+          () => const ChatView(),
+          arguments: {
+            'conversation': newConversation,
+          },
+        )?.then((_) {
+          print('🔄 Returned from ChatView - Reloading conversations');
+          loadConversations();
+        });
       } else {
         throw Exception('Failed to create conversation');
       }
@@ -198,9 +279,18 @@ Future<void> _loadUserIdFromAPI() async {
   }
 
   void listenToNewMessages() {
-    _webSocketService.messageStream.listen((message) {
-      updateConversationWithNewMessage(message);
-      calculateUnreadCount();
+    _webSocketService.messageStream.listen((data) {
+      try {
+        if (data['type'] == 'new_message' && data['message'] != null) {
+          final messageData = data['message'] as Map<String, dynamic>;
+          final message = Message.fromJson(messageData);
+          
+          updateConversationWithNewMessage(message);
+          calculateUnreadCount();
+        }
+      } catch (e) {
+        print('❌ Erreur parsing message WebSocket: $e');
+      }
     });
   }
 
@@ -241,12 +331,11 @@ Future<void> _loadUserIdFromAPI() async {
     print('🔍 Applying filter - currentUserId: $_currentUserId');
     print('📊 Total conversations: ${conversations.length}');
     
-    // ✅ Si pas de currentUserId, affiche quand même avec nom par défaut
     if (searchQuery.isNotEmpty) {
       filteredConversations.assignAll(
         conversations.where((c) {
           final name = (c.name ?? 'Conversation').toLowerCase();
-          final lastMsg = c.lastMessage?.content?.toLowerCase() ?? '';
+          final lastMsg = c.lastMessage?.decryptedContent?.toLowerCase() ?? '';
           final query = searchQuery.value.toLowerCase();
           return name.contains(query) || lastMsg.contains(query);
         }).toList(),
@@ -256,7 +345,7 @@ Future<void> _loadUserIdFromAPI() async {
     }
 
     switch (selectedTabIndex.value) {
-      case 0: // Discussions
+      case 0: // Discussions (1-to-1)
         filteredConversations.assignAll(
           conversations.where((c) => !c.isGroup).toList()
         );
@@ -286,6 +375,7 @@ Future<void> _loadUserIdFromAPI() async {
 }
 
 
+
 // // lib/modules/chat/controllers/messages_controller.dart
 
 // import 'package:flutter/material.dart';
@@ -309,135 +399,233 @@ Future<void> _loadUserIdFromAPI() async {
 //   final selectedTabIndex = 0.obs;
 //   final totalUnreadCount = 0.obs;
 
-//   int? _currentUserId;
-//   int? get currentUserId => _currentUserId;
+//   String? _currentUserId;  // ✅ String UUID
+//   String? get currentUserId => _currentUserId;
 
 //   @override
 //   void onInit() {
 //     super.onInit();
-//     _initCurrentUser();
 //     initializeMessages();
 //   }
 
-//   Future<void> _initCurrentUser() async {
-//     final userId = await _storage.getUserId();
-//     _currentUserId = userId != null ? int.tryParse(userId) : null;
-//     print('👤 Current user ID: $_currentUserId');
-//   }
-
+//   /// ✅ Initialisation complète dans le bon ordre
 //   Future<void> initializeMessages() async {
+//     // 1. Charger currentUserId D'ABORD
+//     await _initCurrentUser();
+    
+//     // 2. Charger conversations
 //     await loadConversations();
+    
+//     // 3. WebSocket
 //     _webSocketService.connect();
 //     listenToNewMessages();
 //   }
 
-//   Future<void> loadConversations() async {
+//   /// ✅ Charge l'ID du user actuel (String UUID)
+//   Future<void> _initCurrentUser() async {
 //     try {
-//       isLoading.value = true;
+//       final userId = await _storage.getUserId();
       
-//       final result = await _messageService.getConversations();
-      
-//       if (result != null) {
-//         // ✅ Trie par date (plus récent en premier)
-//         result.sort((a, b) {
-//           final aDate = a.lastMessageAt ?? a.createdAt;
-//           final bDate = b.lastMessageAt ?? b.createdAt;
-//           return bDate.compareTo(aDate);
-//         });
-        
-//         conversations.assignAll(result);
-//         _applyCurrentFilter();
-//         calculateUnreadCount();
-        
-//         print('✅ Loaded ${conversations.length} conversations');
+//       if (userId != null) {
+//         _currentUserId = userId;
+//         print('👤 Current user ID: $_currentUserId');
+//       } else {
+//         print('⚠️ No user ID in storage');
+//         await _loadUserIdFromAPI();
 //       }
 //     } catch (e) {
-//       print('❌ loadConversations: $e');
-//     } finally {
-//       isLoading.value = false;
+//       print('❌ _initCurrentUser: $e');
+//       await _loadUserIdFromAPI();
 //     }
 //   }
 
-//   // ✅ OUVRIR CONVERSATION EXISTANTE
+//   /// ✅ Charge l'ID depuis l'API en fallback
+//   Future<void> _loadUserIdFromAPI() async {
+//     try {
+//       final data = await _messageService.getCurrentUser();
+      
+//       if (data != null) {
+//         final userIdValue = data['user_id'] ?? data['id'];
+        
+//         if (userIdValue != null) {
+//           _currentUserId = userIdValue.toString();
+//           print('👤 Current user ID from API: $_currentUserId');
+          
+//           await _storage.saveUserId(_currentUserId!);
+//         }
+//       }
+//     } catch (e) {
+//       print('❌ _loadUserIdFromAPI: $e');
+//     }
+//   }
+
+//  Future<void> loadConversations() async {
+//   try {
+//     isLoading.value = true;
+    
+//     final result = await _messageService.getConversations();
+    
+//     if (result != null && result.isNotEmpty) {
+//       // ✅ Déchiffrer le dernier message de chaque conversation
+//       for (var conversation in result) {
+//         if (conversation.lastMessage != null) {
+//           try {
+//             // Vérifier si le message a les champs E2EE
+//             final msg = conversation.lastMessage!;
+            
+//             if (msg.nonce == null || msg.authTag == null || msg.signature == null) {
+//               print('⚠️ Dernier message sans E2EE pour conversation ${conversation.id}');
+              
+//               // Mettre un texte par défaut
+//               final index = result.indexOf(conversation);
+//               result[index] = conversation.copyWith(
+//                 lastMessage: msg.copyWith(
+//                   decryptedContent: '[Message]',
+//                 ),
+//               );
+//               continue;
+//             }
+            
+//             // Déchiffrer le dernier message
+//             final decrypted = await _messageService.decryptMessage(msg);
+            
+//             // Mettre à jour avec le texte déchiffré
+//             final index = result.indexOf(conversation);
+//             result[index] = conversation.copyWith(
+//               lastMessage: msg.copyWith(
+//                 decryptedContent: decrypted,
+//               ),
+//             );
+            
+//           } catch (e) {
+//             print('⚠️ Impossible de déchiffrer dernier message: $e');
+            
+//             // ✅ Gérer gracieusement
+//             String fallbackText;
+            
+//             if (e.toString().contains('Signature invalide')) {
+//               fallbackText = '[Message illisible]';
+//             } else if (e.toString().contains('E2EE fields missing')) {
+//               fallbackText = '[Message]';
+//             } else {
+//               fallbackText = '[Erreur]';
+//             }
+            
+//             final index = result.indexOf(conversation);
+//             result[index] = conversation.copyWith(
+//               lastMessage: conversation.lastMessage!.copyWith(
+//                 decryptedContent: fallbackText,
+//               ),
+//             );
+//           }
+//         }
+//       }
+      
+//       // Trie par date (plus récent en premier)
+//       result.sort((a, b) {
+//         final aDate = a.lastMessageAt ?? a.createdAt;
+//         final bDate = b.lastMessageAt ?? b.createdAt;
+//         return bDate.compareTo(aDate);
+//       });
+      
+//       conversations.assignAll(result);
+      
+//       print('✅ Loaded ${conversations.length} conversations');
+//       print('📋 Conversations: ${conversations.map((c) => '${c.name} (${c.id})').toList()}');
+      
+//       _applyCurrentFilter();
+//       calculateUnreadCount();
+//     } else {
+//       print('⚠️ No conversations loaded');
+//       conversations.clear();
+//       filteredConversations.clear();
+//     }
+//   } catch (e) {
+//     print('❌ loadConversations: $e');
+//   } finally {
+//     isLoading.value = false;
+//   }
+// }
+
+//   /// ✅ Ouvre une conversation existante
 //   void openConversation(Conversation conversation) {
-//     print('📂 Opening conversation: ${conversation.id}');
+//     print('📂 Opening conversation: ${conversation.name} (${conversation.id})');
     
 //     Get.to(
-//       () => ChatView(),
+//       () => const ChatView(),
 //       arguments: {
 //         'conversation': conversation,
-//         'contactName': conversation.displayName(_currentUserId ?? 0),
 //       },
 //       preventDuplicates: true,
 //     )?.then((_) {
-//       // ✅ Recharge la liste au retour
 //       print('🔄 Returned from ChatView - Reloading conversations');
 //       loadConversations();
 //     });
 //   }
 
-//   // ✅ OUVRIR OU CRÉER CONVERSATION (depuis contact)
+//   /// ✅ Ouvre ou crée une conversation depuis un contact
 //   Future<void> openOrCreateConversation({
 //     required String contactUserId,
 //     required String contactName,
 //   }) async {
 //     try {
-//       print('🔍 Looking for conversation with: $contactUserId');
+//       print('🔍 Looking for conversation with user: $contactUserId');
+//       print('   Contact name: $contactName');
       
 //       // 1. Cherche conversation existante
 //       var existing = conversations.firstWhereOrNull((conv) {
 //         if (conv.isGroup) return false;
-//         return conv.participants.any((p) =>
-//           p.userId.toString() == contactUserId.toString()
-//         );
+//         return conv.participants.any((p) => p.userId == contactUserId);
 //       });
 
-//       // 2. Si pas trouvé, recharge la liste (peut-être créée ailleurs)
+//       // 2. Si pas trouvé, recharge la liste
 //       if (existing == null) {
+//         print('🔄 Not found locally, reloading conversations...');
 //         await loadConversations();
+        
 //         existing = conversations.firstWhereOrNull((conv) {
 //           if (conv.isGroup) return false;
-//           return conv.participants.any((p) =>
-//             p.userId.toString() == contactUserId.toString()
-//           );
+//           return conv.participants.any((p) => p.userId == contactUserId);
 //         });
 //       }
 
 //       // 3. Si trouvé, ouvre directement
 //       if (existing != null) {
-//         print('✅ Found existing conversation: ${existing.id}');
+//         print('✅ Found existing conversation: ${existing.name}');
         
-//         // ✅ Retourne d'abord à MessagesView
-//         Get.back();  // Ferme ContactsView
-        
-//         // Attend un peu pour que l'animation se termine
-//         await Future.delayed(const Duration(milliseconds: 100));
-        
-//         // Ouvre ChatView
-//         openConversation(existing);
+//         Get.off(
+//           () => const ChatView(),
+//           arguments: {
+//             'conversation': existing,
+//           },
+//         )?.then((_) {
+//           print('🔄 Returned from ChatView - Reloading conversations');
+//           loadConversations();
+//         });
 //         return;
 //       }
 
 //       // 4. Crée nouvelle conversation
-//       print('📝 Creating new conversation...');
+//       print('📝 Creating new conversation with $contactUserId...');
       
 //       final newConversation = await _messageService.createDirectConversation(
 //         contactUserId,
 //       );
 
 //       if (newConversation != null) {
-//         print('✅ Conversation created: ${newConversation.id}');
+//         print('✅ Conversation created: ${newConversation.name} (${newConversation.id})');
         
-//         // ✅ Recharge la liste complète
 //         await loadConversations();
         
-//         // Retourne à MessagesView
-//         Get.back();
-        
-//         await Future.delayed(const Duration(milliseconds: 100));
-        
-//         // Ouvre ChatView avec la nouvelle conversation
-//         openConversation(newConversation);
+//         Get.off(
+//           () => const ChatView(),
+//           arguments: {
+//             'conversation': newConversation,
+//           },
+//         )?.then((_) {
+//           print('🔄 Returned from ChatView - Reloading conversations');
+//           loadConversations();
+//         });
 //       } else {
 //         throw Exception('Failed to create conversation');
 //       }
@@ -454,13 +642,26 @@ Future<void> _loadUserIdFromAPI() async {
 //     }
 //   }
 
+//   /// ✅ Écoute les nouveaux messages WebSocket
 //   void listenToNewMessages() {
-//     _webSocketService.messageStream.listen((message) {
-//       updateConversationWithNewMessage(message);
-//       calculateUnreadCount();
+//     _webSocketService.messageStream.listen((data) {
+//       // ✅ CORRIGÉ: Parse Map en Message
+//       try {
+//         // Le WebSocket envoie {"type": "new_message", "message": {...}}
+//         if (data['type'] == 'new_message' && data['message'] != null) {
+//           final messageData = data['message'] as Map<String, dynamic>;
+//           final message = Message.fromJson(messageData);
+          
+//           updateConversationWithNewMessage(message);
+//           calculateUnreadCount();
+//         }
+//       } catch (e) {
+//         print('❌ Erreur parsing message WebSocket: $e');
+//       }
 //     });
 //   }
 
+//   /// ✅ Met à jour une conversation avec un nouveau message
 //   Future<void> updateConversationWithNewMessage(Message message) async {
 //     final index = conversations.indexWhere(
 //       (conv) => conv.id == message.conversationId,
@@ -475,7 +676,7 @@ Future<void> _loadUserIdFromAPI() async {
 //         unreadCount: conv.unreadCount + 1,
 //       );
 
-//       // ✅ Déplace en haut de la liste
+//       // Déplace en haut de la liste
 //       conversations.removeAt(index);
 //       conversations.insert(0, updatedConv);
       
@@ -486,33 +687,41 @@ Future<void> _loadUserIdFromAPI() async {
 //     }
 //   }
 
+//   /// ✅ Recherche dans les conversations
 //   void searchConversations(String query) {
 //     searchQuery.value = query;
 //     _applyCurrentFilter();
 //   }
 
+//   /// ✅ Change d'onglet (Discussions / Groupes / Appels)
 //   void changeTab(int index) {
 //     selectedTabIndex.value = index;
 //     _applyCurrentFilter();
 //   }
 
+ 
+//   /// ✅ Applique le filtre actuel (recherche + onglet)
 //   void _applyCurrentFilter() {
-//     if (_currentUserId == null) return;
-
+//     print('🔍 Applying filter - currentUserId: $_currentUserId');
+//     print('📊 Total conversations: ${conversations.length}');
+    
+//     // Recherche
 //     if (searchQuery.isNotEmpty) {
 //       filteredConversations.assignAll(
 //         conversations.where((c) {
-//           final name = c.displayName(_currentUserId!).toLowerCase();
-//           final lastMsg = c.lastMessage?.content?.toLowerCase() ?? '';
+//           final name = (c.name ?? 'Conversation').toLowerCase();
+//           final lastMsg = c.lastMessage?.decryptedContent?.toLowerCase() ?? '';
 //           final query = searchQuery.value.toLowerCase();
 //           return name.contains(query) || lastMsg.contains(query);
 //         }).toList(),
 //       );
+//       print('🔍 Filtered by search: ${filteredConversations.length} results');
 //       return;
 //     }
 
+//     // ✅ Filtre par onglet (seulement 2 onglets maintenant)
 //     switch (selectedTabIndex.value) {
-//       case 0: // Discussions
+//       case 0: // Discussions (1-to-1)
 //         filteredConversations.assignAll(
 //           conversations.where((c) => !c.isGroup).toList()
 //         );
@@ -522,11 +731,14 @@ Future<void> _loadUserIdFromAPI() async {
 //           conversations.where((c) => c.isGroup).toList()
 //         );
 //         break;
-//       default:
+//       default: // Tous
 //         filteredConversations.assignAll(conversations);
 //     }
+    
+//     print('✅ Filtered conversations: ${filteredConversations.length}');
 //   }
 
+//   /// ✅ Calcule le nombre total de non-lus
 //   void calculateUnreadCount() {
 //     totalUnreadCount.value = conversations.fold(
 //       0,
@@ -534,8 +746,9 @@ Future<void> _loadUserIdFromAPI() async {
 //     );
 //   }
 
+//   /// ✅ Refresh manuel
 //   Future<void> refresh() async {
 //     await loadConversations();
 //   }
+  
 // }
-
