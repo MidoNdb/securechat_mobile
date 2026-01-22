@@ -59,13 +59,13 @@ class ProfileView extends GetView<ProfileController> {
         ),
        
       ),
-      actions: [
-        IconButton(
-          icon: Icon(Icons.logout, color: Colors.white),
-          tooltip: 'Déconnexion',
-          onPressed: controller.logout,
-        ),
-      ],
+      // actions: [
+      //   IconButton(
+      //     icon: Icon(Icons.logout, color: Colors.white),
+      //     tooltip: 'Déconnexion',
+      //     onPressed: controller.logout,
+      //   ),
+      // ],
     );
   }
 

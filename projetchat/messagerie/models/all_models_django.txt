@@ -1,0 +1,615 @@
+from django.db import models
+from django.core.exceptions import ValidationError
+from django.utils import timezone
+from authentification.models import User
+import uuid
+
+
+class Contact(models.Model):
+    """
+    Contact book entry (E2EE compatible).
+    """
+    
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False
+    )
+    
+    user = models.ForeignKey(
+        User,
+        related_name='contacts',
+        on_delete=models.CASCADE
+    )
+    
+    contact_user = models.ForeignKey(
+        User,
+        related_name='added_by_contacts',
+        on_delete=models.CASCADE
+    )
+    
+    nickname = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",  # ✅ Chaîne vide par défaut
+        help_text="Custom nickname for this contact"
+    )
+    
+    notes = models.TextField(
+        blank=True,
+        default="",  # ✅ CORRECTION ICI
+        help_text="Private notes about this contact"
+    )
+    
+    is_blocked = models.BooleanField(
+        default=False,
+        db_index=True
+    )
+    
+    is_favorite = models.BooleanField(
+        default=False,
+        db_index=True
+    )
+    
+    is_deleted = models.BooleanField(
+        default=False
+    )
+    
+    added_at = models.DateTimeField(
+        default=timezone.now,
+        db_index=True
+    )
+    
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+    
+    blocked_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+    
+    class Meta:
+        db_table = 'contacts'
+        unique_together = ('user', 'contact_user')
+        ordering = ['-is_favorite', '-added_at']
+        indexes = [
+            models.Index(fields=['user', 'is_blocked']),
+            models.Index(fields=['user', 'is_favorite']),
+            models.Index(fields=['user', 'added_at']),
+        ]
+    
+    def clean(self):
+        if self.user_id and self.contact_user_id:
+            if self.user_id == self.contact_user_id:
+                raise ValidationError("Cannot add yourself as contact")
+        
+        if self.contact_user_id and not self.contact_user.is_active:
+            raise ValidationError("Cannot add inactive user")
+    
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+    
+    def __str__(self):
+        return f"{self.user.display_name} → {self.display_name}"
+    
+    @property
+    def display_name(self):
+        return (
+            self.nickname or
+            self.contact_user.display_name or
+            self.contact_user.phone_number
+        )
+    
+    @property
+    def phone_number(self):
+        return self.contact_user.phone_number
+    
+    @property
+    def is_online(self):
+        return self.contact_user.is_online
+    
+    def block(self):
+        if not self.is_blocked:
+            self.is_blocked = True
+            self.blocked_at = timezone.now()
+            self.save()
+    
+    def unblock(self):
+        if self.is_blocked:
+            self.is_blocked = False
+            self.blocked_at = None
+            self.save()
+    
+    def toggle_favorite(self):
+        self.is_favorite = not self.is_favorite
+        self.save()
+    
+    def soft_delete(self):
+        self.is_deleted = True
+        self.save()
+
+
+from django.db import models
+from django.utils import timezone
+from authentification.models import User
+import uuid
+
+
+class Conversation(models.Model):
+    """
+    Représente une conversation chiffrée (E2EE).
+    Le serveur ne voit jamais le contenu des messages.
+    """
+
+    class Type(models.TextChoices):
+        DIRECT = "DIRECT", "Direct"
+        GROUP = "GROUP", "Group"
+
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False
+    )
+
+    type = models.CharField(
+        max_length=10,
+        choices=Type.choices,
+        db_index=True
+    )
+
+    name = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="created_conversations"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    # ========================================
+    # ✅ AJOUT : Référence au dernier message
+    # ========================================
+    last_message = models.ForeignKey(
+        'Message',  # ⚠️ String reference (Message sera défini après)
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='conversation_last_message',
+        help_text="Dernier message envoyé dans cette conversation"
+    )
+
+    last_message_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True
+    )
+
+    class Meta:
+        ordering = ["-last_message_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["type"]),
+            models.Index(fields=["last_message_at"]),
+        ]
+
+    def __str__(self):
+        if self.type == self.Type.GROUP:
+            return self.name or f"Groupe {self.id}"
+        return f"Conversation directe {self.id}"
+
+
+class ConversationParticipant(models.Model):
+    """
+    Lien entre un utilisateur et une conversation.
+    """
+
+    class Role(models.TextChoices):
+        ADMIN = "ADMIN", "Admin"
+        MEMBER = "MEMBER", "Member"
+
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False
+    )
+
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.CASCADE,
+        related_name="participants"
+    )
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="conversation_memberships"
+    )
+
+    role = models.CharField(
+        max_length=20,
+        choices=Role.choices,
+        default=Role.MEMBER
+    )
+
+    joined_at = models.DateTimeField(auto_now_add=True)
+
+    is_muted = models.BooleanField(default=False)
+    is_archived = models.BooleanField(default=False)
+
+    class Meta:
+        unique_together = ("conversation", "user")
+        indexes = [
+            models.Index(fields=["user"]),
+            models.Index(fields=["conversation"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user.display_name} ({self.role})"
+
+from django.db import models
+from django.core.validators import MinValueValidator
+from django.utils import timezone
+import uuid
+
+
+class Media(models.Model):
+    """
+    Encrypted media attachment (E2EE).
+    """
+    
+    class Type(models.TextChoices):
+        IMAGE = "IMAGE", "Image"
+        VIDEO = "VIDEO", "Video"
+        AUDIO = "AUDIO", "Audio"
+        VOICE = "VOICE", "Voice Note"
+        FILE = "FILE", "File"
+    
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False
+    )
+    
+    message = models.ForeignKey(
+        'messagerie.Message',
+        related_name='media_attachments',
+        on_delete=models.CASCADE
+    )
+    
+    type = models.CharField(
+        max_length=20,
+        choices=Type.choices,
+        db_index=True
+    )
+    
+    encrypted_file_url = models.TextField(
+        help_text="URL to encrypted file blob"
+    )
+    
+    encrypted_thumbnail_url = models.TextField(
+        blank=True,
+        default="",
+        help_text="URL to encrypted thumbnail"
+    )
+    
+    encrypted_filename = models.TextField(
+        blank=True,
+        default="",  # ✅ CORRECTION
+        help_text="Original filename (encrypted)"
+    )
+    
+    file_size = models.BigIntegerField(
+        validators=[MinValueValidator(1)],
+        help_text="File size in bytes"
+    )
+    
+    duration = models.IntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0)],
+        help_text="Duration in seconds (audio/video only)"
+    )
+    
+    width = models.IntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        help_text="Width in pixels"
+    )
+    
+    height = models.IntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        help_text="Height in pixels"
+    )
+    
+    encrypted_metadata = models.TextField(
+        blank=True,
+        default="",
+        help_text="Additional encrypted metadata"
+    )
+    
+    is_uploaded = models.BooleanField(
+        default=False
+    )
+    
+    upload_progress = models.IntegerField(
+        default=0,
+        validators=[MinValueValidator(0)]
+    )
+    
+    created_at = models.DateTimeField(
+        default=timezone.now,
+        db_index=True
+    )
+    
+    uploaded_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+    
+    class Meta:
+        db_table = 'media'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['message', 'type']),
+            models.Index(fields=['type', 'created_at']),
+            models.Index(fields=['is_uploaded']),
+        ]
+    
+    def __str__(self):
+        return f"{self.type} - {self.message_id}"
+    
+    @property
+    def size_mb(self):
+        return round(self.file_size / (1024 * 1024), 2)
+    
+    @property
+    def duration_formatted(self):
+        if not self.duration:
+            return None
+        minutes = self.duration // 60
+        seconds = self.duration % 60
+        return f"{minutes:02d}:{seconds:02d}"
+    
+    def mark_uploaded(self):
+        self.is_uploaded = True
+        self.upload_progress = 100
+        self.uploaded_at = timezone.now()
+        self.save()
+    
+    def update_progress(self, progress):
+        if 0 <= progress <= 100:
+            self.upload_progress = progress
+            self.save()
+
+
+from django.db import models
+from django.utils import timezone
+from authentification.models import User
+import uuid
+
+class MessageStatus(models.Model):
+    """
+    Statut de lecture par utilisateur (E2EE groupes).
+    
+    Exemple:
+    - Message envoyé à groupe de 5 personnes
+    - 5 MessageStatus créés (un par personne)
+    - Chacun track indépendamment: SENT → DELIVERED → READ
+    """
+    
+    class Status(models.TextChoices):
+        SENT = "SENT", "Sent"
+        DELIVERED = "DELIVERED", "Delivered"
+        READ = "READ", "Read"
+    
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False
+    )
+    
+    message = models.ForeignKey(
+        'messagerie.Message',  # ✅ Évite import circulaire
+        related_name='statuses',
+        on_delete=models.CASCADE
+    )
+    
+    user = models.ForeignKey(
+        User,
+        related_name='message_read_receipts',  # ✅ Plus clair
+        on_delete=models.CASCADE
+    )
+    
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.SENT,
+        db_index=True
+    )
+    
+    # 📅 Timestamps précis
+    created_at = models.DateTimeField(
+        default=timezone.now,
+        help_text="Quand le message a été envoyé"
+    )
+    
+    delivered_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Quand l'utilisateur a reçu le message"
+    )
+    
+    read_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Quand l'utilisateur a lu le message"
+    )
+    
+    class Meta:
+        db_table = 'message_statuses'
+        unique_together = ('message', 'user')
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['message', 'status']),
+        ]
+        verbose_name = 'Message Status'
+        verbose_name_plural = 'Message Statuses'
+    
+    def __str__(self):
+        return f"{self.user.display_name} - {self.status}"
+    
+    def mark_delivered(self):
+        """Marquer comme livré"""
+        if self.status == self.Status.SENT:
+            self.status = self.Status.DELIVERED
+            self.delivered_at = timezone.now()
+            self.save()
+    
+    def mark_read(self):
+        """Marquer comme lu"""
+        if self.status != self.Status.READ:
+            self.status = self.Status.READ
+            self.read_at = timezone.now()
+            if not self.delivered_at:
+                self.delivered_at = timezone.now()
+            self.save()
+
+
+
+
+
+# messagerie/models/message.py
+# ✅ REMPLACE TON FICHIER message.py AVEC CE CODE COMPLET
+
+from django.db import models
+from django.utils import timezone
+from authentification.models import User
+from .conversation import Conversation
+import uuid
+
+
+class Message(models.Model):
+    """
+    Message chiffré de bout en bout (E2EE).
+    Le serveur ne peut JAMAIS lire le contenu.
+    
+    Architecture E2EE:
+    - encrypted_content: Ciphertext AES-256-GCM
+    - nonce: Nombre unique pour chaque chiffrement
+    - auth_tag: Tag d'authentification GCM
+    - signature: Signature Ed25519 pour authenticité
+    """
+
+    class Type(models.TextChoices):
+        TEXT = "TEXT", "Text"
+        IMAGE = "IMAGE", "Image"
+        VIDEO = "VIDEO", "Video"
+        VOICE = "VOICE", "Voice"
+        FILE = "FILE", "File"
+        SYSTEM = "SYSTEM", "System"
+
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False
+    )
+
+    conversation = models.ForeignKey(
+        Conversation,
+        related_name="messages",
+        on_delete=models.CASCADE
+    )
+
+    from_user = models.ForeignKey(
+        User,
+        related_name="sent_messages",
+        on_delete=models.CASCADE
+    )
+    recipient_user = models.ForeignKey(
+        User,
+        related_name="received_messages",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        help_text="User pour qui le message a été chiffré (utilisé pour déchiffrement)"
+    )
+
+    type = models.CharField(
+        max_length=20,
+        choices=Type.choices,
+        default=Type.TEXT
+    )
+
+    # ========================================
+    # ✅ CHAMPS E2EE COMPLETS (4 champs)
+    # ========================================
+    
+    encrypted_content = models.TextField(
+        help_text="Ciphertext AES-256-GCM (Base64)"
+    )
+    
+    nonce = models.CharField(
+        max_length=255,
+        default='',
+        help_text="Nonce AES-GCM (Base64) - 12 bytes"
+    )
+    
+    auth_tag = models.CharField(
+        max_length=255,
+        default='',
+        help_text="Authentication tag AES-GCM (Base64) - 16 bytes"
+    )
+    
+    signature = models.TextField(
+        default='',
+        help_text="Signature Ed25519 du hash du ciphertext (Base64)"
+    )
+
+    metadata = models.JSONField(
+        blank=True,
+        null=True,
+        help_text="Métadonnées non sensibles (file_name, size, etc.)"
+    )
+
+    reply_to = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="replies"
+    )
+
+    is_deleted = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        db_index=True
+    )
+
+    class Meta:
+        db_table = 'messages'
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["conversation", "created_at"]),
+            models.Index(fields=["from_user"]),
+        ]
+        verbose_name = 'Message'
+        verbose_name_plural = 'Messages'
+
+    def __str__(self):
+        name = self.from_user.display_name or self.from_user.phone_number
+        return f"{name} - {self.type} - {self.created_at.strftime('%Y-%m-%d %H:%M')}"
+    
+

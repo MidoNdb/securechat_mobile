@@ -122,7 +122,7 @@ class MessageViewSet(viewsets.ModelViewSet):
                 signature=signature,
                 type=message_type
             )
-
+            
             print(f'✅ Message créé: {message.id}')
             print(f'   De: {request.user.phone_number}')
             print(f'   Pour: {recipient_user.phone_number}')

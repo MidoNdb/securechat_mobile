@@ -79,3 +79,5 @@ class AppPages {
     // Ajouter les autres routes ici
   ];
 }
+
+

@@ -36,14 +36,14 @@ class MessageInput extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 decoration: BoxDecoration(
                   color: Colors.grey[100],
-                  borderRadius: BorderRadius.circular(24),
+                  // borderRadius: BorderRadius.circular(24),
                 ),
                 child: TextField(
                   controller: controller,
                   decoration: const InputDecoration(
                     hintText: 'Message...',
                     border: InputBorder.none,
-                    contentPadding: EdgeInsets.symmetric(vertical: 10),
+                    // contentPadding: EdgeInsets.symmetric(vertical: 10),
                   ),
                   maxLines: null,
                   textCapitalization: TextCapitalization.sentences,

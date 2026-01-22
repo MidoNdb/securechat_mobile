@@ -1,8 +1,11 @@
 // lib/modules/chat/widgets/message_bubble.dart
+// ✅ VERSION AMÉLIORÉE - Switch automatique selon type de message
 
+import 'package:chat_mobile/data/models/message.dart';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
-import '../../../data/models/message.dart';
+import 'bubbles/text_bubble.dart';
+import 'bubbles/image_bubble.dart';
+import 'bubbles/voice_bubble.dart';
 
 class MessageBubble extends StatelessWidget {
   final Message message;
@@ -20,123 +23,78 @@ class MessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // ✅ Switch selon le type de message
+    switch (message.type.toUpperCase()) {
+      case 'IMAGE':
+        return ImageBubble(
+          message: message,
+          isMe: isMe,
+          showAvatar: showAvatar,
+          senderName: senderName,
+        );
+      
+      case 'VOICE':
+        return VoiceBubble(
+          message: message,
+          isMe: isMe,
+          showAvatar: showAvatar,
+          senderName: senderName,
+        );
+      
+      case 'FILE':
+        // TODO: Implémenter FileBubble
+        return _buildComingSoon('FILE');
+      
+      case 'TEXT':
+      default:
+        return TextBubble(
+          message: message,
+          isMe: isMe,
+          showAvatar: showAvatar,
+          senderName: senderName,
+        );
+    }
+  }
+  
+  /// Widget temporaire pour types non implémentés
+  Widget _buildComingSoon(String type) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: Row(
-        mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          if (!isMe && showAvatar) _buildAvatar(),
-          if (!isMe && showAvatar) const SizedBox(width: 8),
-          Flexible(child: _buildBubble(context)),
-          if (isMe && showAvatar) const SizedBox(width: 8),
-          if (isMe && showAvatar) _buildAvatar(),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAvatar() {
-    return CircleAvatar(
-      radius: 16,
-      backgroundColor: const Color(0xFF667eea),
-      child: Text(
-        (senderName ?? 'U')[0].toUpperCase(),
-        style: const TextStyle(color: Colors.white, fontSize: 14),
-      ),
-    );
-  }
-
-  Widget _buildBubble(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: isMe ? const Color(0xFF667eea) : Colors.grey[200],
-        borderRadius: BorderRadius.only(
-          topLeft: const Radius.circular(18),
-          topRight: const Radius.circular(18),
-          bottomLeft: Radius.circular(isMe ? 18 : 4),
-          bottomRight: Radius.circular(isMe ? 4 : 18),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (!isMe && showAvatar && senderName != null) ...[
-            Text(
-              senderName!,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: Colors.grey[700],
-              ),
-            ),
-            const SizedBox(height: 4),
-          ],
-          // ✅ CORRIGÉ: Utilise decryptedContent au lieu de content
-          Text(
-            message.decryptedContent ?? '[Message chiffré]',
-            style: TextStyle(
-              color: isMe ? Colors.white : Colors.black87,
-              fontSize: 15,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Align(
+        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          decoration: BoxDecoration(
+            color: Colors.orange[100],
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: Colors.orange[300]!,
+              width: 1,
             ),
           ),
-          const SizedBox(height: 4),
-          Row(
+          child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
+              const Icon(
+                Icons.info_outline,
+                color: Colors.orange,
+                size: 20,
+              ),
+              const SizedBox(width: 8),
               Text(
-                _formatTime(message.timestamp),
-                style: TextStyle(
-                  fontSize: 11,
-                  color: isMe ? Colors.white70 : Colors.grey[600],
+                'Type $type - Bientôt disponible',
+                style: const TextStyle(
+                  color: Colors.orange,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
                 ),
               ),
-              if (isMe) ...[
-                const SizedBox(width: 4),
-                _buildStatusIcon(),
-              ],
             ],
           ),
-        ],
+        ),
       ),
     );
   }
-
-  Widget _buildStatusIcon() {
-    IconData icon;
-    Color color;
-
-    switch (message.status) {
-      case 'sending':
-        icon = Icons.access_time;
-        color = Colors.white70;
-        break;
-      case 'sent':
-        icon = Icons.check;
-        color = Colors.white70;
-        break;
-      case 'delivered':
-        icon = Icons.done_all;
-        color = Colors.white70;
-        break;
-      case 'read':
-        icon = Icons.done_all;
-        color = Colors.lightBlueAccent;
-        break;
-      case 'failed':
-        icon = Icons.error_outline;
-        color = Colors.red[300]!;
-        break;
-      default:
-        icon = Icons.check;
-        color = Colors.white70;
-    }
-
-    return Icon(icon, size: 14, color: color);
-  }
-
-  String _formatTime(DateTime dateTime) {
-    return DateFormat('HH:mm').format(dateTime);
-  }
 }
+
+

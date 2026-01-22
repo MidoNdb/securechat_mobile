@@ -1,5 +1,7 @@
 // lib/modules/chat/controllers/chat_controller.dart
+// ✅ VERSION FINALE CORRIGÉE - Support complet vocal + images
 
+import 'dart:io';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -8,12 +10,17 @@ import '../../../data/models/message.dart';
 import '../../../data/services/message_service.dart';
 import '../../../data/services/websocket_service.dart';
 import '../../../data/services/secure_storage_service.dart';
+import '../../../data/services/image_message_service.dart';
+import '../../../data/services/voice_message_service.dart';
 
 class ChatController extends GetxController {
   final MessageService _messageService = Get.find<MessageService>();
   final WebSocketService _websocketService = Get.find<WebSocketService>();
   final SecureStorageService _storage = Get.find<SecureStorageService>();
-
+  
+  late final ImageMessageService _imageService;
+  late final VoiceMessageService _voiceService;
+  
   // Conversation
   late Conversation conversation;
 
@@ -24,11 +31,15 @@ class ChatController extends GetxController {
   // States
   final messages = <Message>[].obs;
   final isLoading = false.obs;
-  final isLoadingMore = false.obs;  // ✅ AJOUTÉ
+  final isLoadingMore = false.obs;
   final isSendingMessage = false.obs;
+  final hasMessageText = false.obs;
+  
+  // Images sélectionnées
+  final selectedImages = <File>[].obs;
 
   // User ID
-  String? _currentUserId;  // ✅ String UUID
+  String? _currentUserId;
   String? get currentUserId => _currentUserId;
 
   // Pagination
@@ -41,64 +52,68 @@ class ChatController extends GetxController {
   @override
   void onInit() {
     super.onInit();
+    
+    // Initialiser les services multimédia
+    try {
+      _imageService = Get.find<ImageMessageService>();
+      print('✅ ImageMessageService initialisé');
+    } catch (e) {
+      print('⚠️ ImageMessageService non disponible: $e');
+    }
+    
+    try {
+      _voiceService = Get.find<VoiceMessageService>();
+      print('✅ VoiceMessageService initialisé');
+    } catch (e) {
+      print('⚠️ VoiceMessageService non disponible: $e');
+    }
+    
+    // Écouter changements TextField
+    messageController.addListener(() {
+      final hasText = messageController.text.trim().isNotEmpty;
+      if (hasMessageText.value != hasText) {
+        hasMessageText.value = hasText;
+      }
+    });
+    
     _initChat();
   }
 
   Future<void> _initChat() async {
     try {
-      // 1. Récupérer conversation depuis arguments
       final args = Get.arguments as Map<String, dynamic>;
       conversation = args['conversation'] as Conversation;
 
-      print('💬 ChatController init pour conversation: ${conversation.id}');
-
-      // 2. Charger currentUserId
       await _loadCurrentUserId();
 
-      // 3. Connecter WebSocket si nécessaire
       if (!_websocketService.isConnected.value) {
         await _websocketService.connect();
       }
 
-      // 4. Rejoindre la conversation
       _messageService.joinConversation(conversation.id);
-
-      // 5. Charger messages initiaux
       await loadMessages();
-
-      // 6. Écouter nouveaux messages
       _listenNewMessages();
-
-      // 7. Marquer comme lu
       await _messageService.markConversationAsRead(conversation.id);
 
     } catch (e) {
       print('❌ Erreur init chat: $e');
-      Get.snackbar(
-        'Erreur',
-        'Impossible de charger le chat',
-        backgroundColor: Colors.red.withOpacity(0.1),
-        colorText: Colors.red,
-      );
+      _showError('Impossible de charger le chat');
     }
   }
 
   Future<void> _loadCurrentUserId() async {
     try {
       final userId = await _storage.getUserId();
-      _currentUserId = userId;  // ✅ String
-      print('👤 Current user ID: $_currentUserId');
+      _currentUserId = userId;
+      print('✅ User ID chargé: $userId');
     } catch (e) {
       print('❌ Erreur chargement user ID: $e');
     }
   }
 
-  /// ✅ Charge les messages initiaux
   Future<void> loadMessages({bool showLoading = true}) async {
     try {
       if (showLoading) isLoading.value = true;
-
-      print('📥 Chargement messages...');
 
       final loadedMessages = await _messageService.getConversationMessages(
         conversationId: conversation.id,
@@ -108,35 +123,24 @@ class ChatController extends GetxController {
 
       messages.value = loadedMessages.reversed.toList();
 
-      print('✅ ${messages.length} messages chargés');
-
-      // Scroll vers le bas
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _scrollToBottom();
       });
 
     } catch (e) {
       print('❌ Erreur loadMessages: $e');
-      Get.snackbar(
-        'Erreur',
-        'Impossible de charger les messages',
-        backgroundColor: Colors.red.withOpacity(0.1),
-        colorText: Colors.red,
-      );
+      _showError('Impossible de charger les messages');
     } finally {
       isLoading.value = false;
     }
   }
 
-  /// ✅ Charger plus de messages (pagination)
   Future<void> onLoadMore() async {
     if (isLoadingMore.value || !_hasMoreMessages) return;
 
     try {
       isLoadingMore.value = true;
       _currentPage++;
-
-      print('📥 Chargement page $_currentPage...');
 
       final olderMessages = await _messageService.getConversationMessages(
         conversationId: conversation.id,
@@ -146,11 +150,8 @@ class ChatController extends GetxController {
 
       if (olderMessages.isEmpty) {
         _hasMoreMessages = false;
-        print('⚠️ Plus de messages à charger');
       } else {
-        // Ajouter en début de liste (messages plus anciens)
         messages.insertAll(0, olderMessages.reversed);
-        print('✅ ${olderMessages.length} messages supplémentaires chargés');
       }
 
     } catch (e) {
@@ -160,64 +161,64 @@ class ChatController extends GetxController {
     }
   }
 
-  /// ✅ Écouter nouveaux messages WebSocket
   void _listenNewMessages() {
     _newMessagesSubscription = _messageService.newMessagesStream.listen(
       (message) {
-        // Vérifier que le message est pour cette conversation
         if (message.conversationId == conversation.id) {
+          // ✅ Log pour debug selon le type
+          if (message.type == 'VOICE') {
+            print('🎤 Message vocal reçu: ${message.id}');
+          } else if (message.type == 'IMAGE') {
+            print('🖼️ Message image reçu: ${message.id}');
+          }
+          
           _addNewMessage(message);
         }
       },
       onError: (error) {
-        print('❌ Erreur stream nouveaux messages: $error');
+        print('❌ Erreur stream: $error');
       },
     );
-
-    print('👂 Écoute des nouveaux messages activée');
   }
 
-  /// ✅ Ajouter nouveau message
   void _addNewMessage(Message message) {
-    // Vérifier que le message n'existe pas déjà
     final exists = messages.any((m) => m.id == message.id);
     if (exists) {
-      print('⚠️ Message déjà dans la liste: ${message.id}');
+      print('⚠️ Message déjà présent: ${message.id}');
       return;
     }
 
-    print('📨 Nouveau message ajouté: ${message.id}');
-
-    // Ajouter à la fin de la liste
     messages.add(message);
+    print('✅ Nouveau message ajouté: ${message.id} (type: ${message.type})');
 
-    // Scroll vers le bas
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scrollToBottom();
     });
 
-    // Marquer comme lu si ce n'est pas notre message
     if (message.senderId != _currentUserId) {
       _messageService.markConversationAsRead(conversation.id);
     }
   }
 
-  /// ✅ Envoyer un message
-  Future<void> sendMessage() async {
-    final text = messageController.text.trim();
+  // ==================== ENVOI MESSAGES ====================
 
+  Future<void> sendMessage() async {
+    // Si images sélectionnées, envoyer images
+    if (selectedImages.isNotEmpty) {
+      await sendSelectedImages();
+      return;
+    }
+    
+    // Sinon envoyer texte
+    final text = messageController.text.trim();
     if (text.isEmpty) return;
     if (isSendingMessage.value) return;
 
     try {
       isSendingMessage.value = true;
 
-      print('📤 Envoi message...');
-
-      // Récupérer l'autre participant
       final recipientId = _getRecipientId();
 
-      // Envoyer via HTTP
       final sentMessage = await _messageService.sendMessage(
         conversationId: conversation.id,
         recipientUserId: recipientId,
@@ -225,36 +226,156 @@ class ChatController extends GetxController {
         type: 'TEXT',
       );
 
-      print('✅ Message envoyé: ${sentMessage.id}');
-
-      // Effacer le champ
       messageController.clear();
-
-      // Le message sera reçu via WebSocket et ajouté automatiquement
-      // Mais on peut l'ajouter optimistiquement:
       _addNewMessage(sentMessage);
 
     } catch (e) {
       print('❌ Erreur sendMessage: $e');
-      Get.snackbar(
-        'Erreur',
-        'Impossible d\'envoyer le message',
-        backgroundColor: Colors.red.withOpacity(0.1),
-        colorText: Colors.red,
-      );
+      _showError('Impossible d\'envoyer le message');
     } finally {
       isSendingMessage.value = false;
     }
   }
 
-  /// ✅ Récupérer l'ID du destinataire
-  String _getRecipientId() {
-    return conversation.participants
-        .firstWhere((p) => p.userId != _currentUserId)
-        .userId;
+  // ==================== GESTION IMAGES ====================
+
+  void addImageToSelection(File imageFile) {
+    if (selectedImages.length >= 10) {
+      _showWarning('Maximum 10 images à la fois');
+      return;
+    }
+    
+    selectedImages.add(imageFile);
+    print('✅ Image ajoutée à la sélection (${selectedImages.length}/10)');
   }
 
-  /// ✅ Scroll vers le bas
+  void removeImageFromSelection(int index) {
+    selectedImages.removeAt(index);
+    print('✅ Image retirée de la sélection (${selectedImages.length}/10)');
+  }
+
+  Future<void> sendSelectedImages() async {
+    if (selectedImages.isEmpty) return;
+    if (isSendingMessage.value) return;
+
+    try {
+      isSendingMessage.value = true;
+      
+      final recipientId = _getRecipientId();
+      final imagesToSend = List<File>.from(selectedImages);
+      
+      print('📤 Envoi de ${imagesToSend.length} image(s)...');
+      
+      // Vider la sélection immédiatement
+      selectedImages.clear();
+
+      // Envoyer chaque image
+      int successCount = 0;
+      for (int i = 0; i < imagesToSend.length; i++) {
+        try {
+          print('📤 Envoi image ${i + 1}/${imagesToSend.length}...');
+          
+          final message = await _imageService.sendImage(
+            conversationId: conversation.id,
+            recipientUserId: recipientId,
+            imageFile: imagesToSend[i],
+          );
+
+          _addNewMessage(message);
+          successCount++;
+          
+        } catch (e) {
+          print('❌ Erreur envoi image ${i + 1}: $e');
+        }
+      }
+
+      if (successCount > 0) {
+        _showSuccess('$successCount image(s) envoyée(s)');
+      } else {
+        _showError('Aucune image envoyée');
+      }
+
+    } catch (e) {
+      print('❌ Erreur sendSelectedImages: $e');
+      _showError('Impossible d\'envoyer les images');
+    } finally {
+      isSendingMessage.value = false;
+    }
+  }
+
+  // ==================== MESSAGE VOCAL ====================
+
+  /// ✅ Envoyer un message vocal avec validation complète
+  Future<void> sendVoiceMessage(String voiceFilePath) async {
+    print('🎤 === DÉBUT ENVOI MESSAGE VOCAL ===');
+    print('🎤 Chemin fichier: $voiceFilePath');
+    
+    if (isSendingMessage.value) {
+      print('⚠️ Envoi déjà en cours, annulation');
+      return;
+    }
+
+    try {
+      isSendingMessage.value = true;
+      
+      // 1. Vérifier le fichier existe
+      final voiceFile = File(voiceFilePath);
+      if (!await voiceFile.exists()) {
+        throw Exception('Fichier vocal introuvable: $voiceFilePath');
+      }
+      
+      final fileSize = await voiceFile.length();
+      print('✅ Fichier vocal trouvé: ${fileSize / 1024} KB');
+      
+      // 2. Vérifier le service est disponible
+      if (_voiceService == null) {
+        throw Exception('VoiceMessageService non initialisé');
+      }
+      
+      // 3. Récupérer le destinataire
+      final recipientId = _getRecipientId();
+      print('📤 Destinataire: $recipientId');
+      
+      // 4. Envoyer via le service
+      print('🔐 Chiffrement et envoi en cours...');
+      final message = await _voiceService.sendVoice(
+        conversationId: conversation.id,
+        recipientUserId: recipientId,
+        voiceFile: voiceFile,
+      );
+
+      print('✅ Message vocal envoyé: ${message.id}');
+      
+      // 5. Ajouter à la liste
+      _addNewMessage(message);
+      
+      // 6. Feedback utilisateur
+      _showSuccess('Message vocal envoyé');
+      
+      print('🎤 === FIN ENVOI MESSAGE VOCAL ===');
+
+    } catch (e, stackTrace) {
+      print('❌ Erreur sendVoiceMessage: $e');
+      print('Stack trace: $stackTrace');
+      _showError('Impossible d\'envoyer le message vocal');
+    } finally {
+      isSendingMessage.value = false;
+    }
+  }
+
+  // ==================== UTILITAIRES ====================
+
+  String _getRecipientId() {
+    try {
+      final recipient = conversation.participants
+          .firstWhere((p) => p.userId != _currentUserId);
+      return recipient.userId;
+    } catch (e) {
+      print('❌ Erreur récupération recipientId: $e');
+      throw Exception('Impossible de trouver le destinataire');
+    }
+  }
+
   void _scrollToBottom() {
     if (scrollController.hasClients) {
       scrollController.animateTo(
@@ -265,6 +386,50 @@ class ChatController extends GetxController {
     }
   }
 
+  // ==================== FEEDBACK UTILISATEUR ====================
+
+  void _showSuccess(String message) {
+    Get.snackbar(
+      'Succès',
+      message,
+      snackPosition: SnackPosition.BOTTOM,
+      duration: const Duration(seconds: 2),
+      backgroundColor: Colors.green.withOpacity(0.1),
+      colorText: Colors.green[900],
+      icon: const Icon(Icons.check_circle_outline, color: Colors.green),
+      margin: const EdgeInsets.all(16),
+      borderRadius: 12,
+    );
+  }
+
+  void _showError(String message) {
+    Get.snackbar(
+      'Erreur',
+      message,
+      snackPosition: SnackPosition.BOTTOM,
+      duration: const Duration(seconds: 3),
+      backgroundColor: Colors.red.withOpacity(0.1),
+      colorText: Colors.red,
+      icon: const Icon(Icons.error_outline, color: Colors.red),
+      margin: const EdgeInsets.all(16),
+      borderRadius: 12,
+    );
+  }
+
+  void _showWarning(String message) {
+    Get.snackbar(
+      'Attention',
+      message,
+      snackPosition: SnackPosition.BOTTOM,
+      duration: const Duration(seconds: 2),
+      backgroundColor: Colors.orange.withOpacity(0.1),
+      colorText: Colors.orange[900],
+      icon: const Icon(Icons.warning_amber_rounded, color: Colors.orange),
+      margin: const EdgeInsets.all(16),
+      borderRadius: 12,
+    );
+  }
+
   @override
   void onClose() {
     messageController.dispose();
@@ -273,267 +438,4 @@ class ChatController extends GetxController {
     super.onClose();
   }
 }
-
-
-
-// // lib/modules/chat/controllers/chat_controller.dart
-
-// import 'package:flutter/material.dart';
-// import 'package:get/get.dart';
-// import '../../../data/models/conversation.dart';
-// import '../../../data/models/message.dart';
-// import '../../../data/services/message_service.dart';
-// import '../../../data/services/websocket_service.dart';
-// import '../../../data/services/secure_storage_service.dart';
-
-// class ChatController extends GetxController {
-//   final MessageService _messageService = Get.find<MessageService>();
-//   final WebSocketService _webSocketService = Get.find<WebSocketService>();
-//   final SecureStorageService _storage = Get.find<SecureStorageService>();
-
-//   late final TextEditingController messageController;
-//   final scrollController = ScrollController();
-
-//   final messages = <Message>[].obs;
-//   final isLoading = false.obs;
-//   final isSendingMessage = false.obs;
-//   final isLoadingMore = false.obs;
-
-//   late Conversation conversation;
-//   int? _currentUserId;
-//   int? get currentUserId => _currentUserId;
-//   int _currentPage = 1;
-//   bool _hasMoreMessages = true;
-
-//   @override
-//   void onInit() {
-//     super.onInit();
-//     messageController = TextEditingController();
-    
-//     // ✅ Récupère conversation des arguments
-//     final args = Get.arguments as Map<String, dynamic>;
-//     conversation = args['conversation'] as Conversation;
-    
-//     print('💬 ChatController initialized for: ${conversation.name}');
-    
-//     _initCurrentUser();
-//     _initChat();
-//   }
-
-//   /// ✅ Charge l'ID du user actuel
-//   Future<void> _initCurrentUser() async {
-//     try {
-//       final userId = await _storage.getUserId();
-//       _currentUserId = userId != null ? int.tryParse(userId) : null;
-//       print('👤 Current user ID in chat: $_currentUserId');
-//     } catch (e) {
-//       print('❌ _initCurrentUser: $e');
-//     }
-//   }
-
-//   /// ✅ Initialise le chat
-//   Future<void> _initChat() async {
-//     await loadMessages();
-//     _listenToNewMessages();
-//     _markAsRead();
-//   }
-
-//   /// ✅ Charge les messages d'une conversation
-//   Future<void> loadMessages({bool isRefresh = false}) async {
-//     if (isRefresh) {
-//       _currentPage = 1;
-//       _hasMoreMessages = true;
-//     }
-
-//     if (!_hasMoreMessages) return;
-
-//     try {
-//       if (isRefresh) {
-//         isLoading.value = true;
-//       } else {
-//         isLoadingMore.value = true;
-//       }
-
-//       // ✅ conversation.id est String UUID
-//       final result = await _messageService.getMessages(
-//         conversation.id,
-//         page: _currentPage,
-//       );
-
-//       if (result != null) {
-//         if (isRefresh) {
-//           messages.assignAll(result.reversed);
-//         } else {
-//           messages.insertAll(0, result.reversed);
-//         }
-
-//         _hasMoreMessages = result.length >= 50;
-//         _currentPage++;
-
-//         print('✅ Loaded ${result.length} messages (page $_currentPage)');
-
-//         Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
-//       }
-//     } catch (e) {
-//       print('❌ loadMessages: $e');
-//     } finally {
-//       isLoading.value = false;
-//       isLoadingMore.value = false;
-//     }
-//   }
-
-//   /// ✅ Envoie un message
-//   Future<void> sendMessage() async {
-//     final content = messageController.text.trim();
-//     if (content.isEmpty || isSendingMessage.value) return;
-
-//     final recipientUserId = _getRecipientUserId();
-//     if (recipientUserId == null) {
-//       Get.snackbar('Erreur', 'Destinataire introuvable');
-//       return;
-//     }
-
-//     try {
-//       isSendingMessage.value = true;
-
-//       // ✅ ID temporaire String unique
-//       final tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
-
-//       final tempMessage = Message(
-//         id: tempId,
-//         conversationId: conversation.id,
-//         senderId: _currentUserId ?? 0,
-//         content: content,
-//         type: 'text',
-//         status: 'sending',
-//         timestamp: DateTime.now(),
-//       );
-
-//       messages.add(tempMessage);
-//       messageController.clear();
-//       _scrollToBottom();
-
-//       print('📤 Sending message to conversation: ${conversation.id}');
-
-//       // ✅ conversation.id est String UUID
-//       final sentMessage = await _messageService.sendMessage(
-//         conversationId: conversation.id,
-//         content: content,
-//         recipientUserId: recipientUserId.toString(),
-//       );
-
-//       if (sentMessage != null) {
-//         print('✅ Message sent successfully');
-//         final index = messages.indexWhere((m) => m.id == tempId);
-//         if (index != -1) {
-//           messages[index] = sentMessage;
-//         }
-//       } else {
-//         print('❌ Message send failed');
-//         final index = messages.indexWhere((m) => m.id == tempId);
-//         if (index != -1) {
-//           messages[index] = tempMessage.copyWith(status: 'failed');
-//         }
-//       }
-//     } catch (e) {
-//       print('❌ sendMessage: $e');
-//       Get.snackbar('Erreur', 'Impossible d\'envoyer le message');
-//     } finally {
-//       isSendingMessage.value = false;
-//     }
-//   }
-
-//   /// ✅ Écoute les nouveaux messages WebSocket
-//   void _listenToNewMessages() {
-//     _webSocketService.messageStream.listen((message) {
-//       // ✅ Compare String IDs
-//       if (message.conversationId == conversation.id) {
-//         final exists = messages.any((m) => m.id == message.id);
-//         if (!exists) {
-//           print('📨 New message received via WebSocket');
-//           messages.add(message);
-//           _scrollToBottom();
-//           _markAsRead();
-//         }
-//       }
-//     });
-
-//     _webSocketService.statusStream.listen((status) {
-//       if (status['type'] == 'delivered' || status['type'] == 'read') {
-//         _updateMessageStatus(status);
-//       }
-//     });
-//   }
-
-//   /// ✅ Met à jour le statut d'un message
-//   void _updateMessageStatus(Map<String, dynamic> status) {
-//     // ✅ Normalise en String
-//     final messageId = status['message_id']?.toString() ?? '';
-//     final newStatus = status['type']?.toString() ?? '';
-
-//     final index = messages.indexWhere((m) => m.id == messageId);
-//     if (index != -1) {
-//       messages[index] = messages[index].copyWith(
-//         status: newStatus,
-//         isDelivered: newStatus == 'delivered' || newStatus == 'read',
-//         isRead: newStatus == 'read',
-//       );
-//     }
-//   }
-
-//   /// ✅ Marque les messages comme lus
-//   Future<void> _markAsRead() async {
-//     try {
-//       // ✅ conversation.id est String UUID
-//       await _messageService.markAsRead(conversation.id);
-//       print('✅ Messages marked as read');
-//     } catch (e) {
-//       print('❌ _markAsRead: $e');
-//     }
-//   }
-
-//   /// ✅ Obtient l'ID du destinataire
-//   int? _getRecipientUserId() {
-//     if (conversation.isGroup) {
-//       // Pour les groupes, retourne le premier participant (à améliorer)
-//       return conversation.participants.isNotEmpty 
-//           ? conversation.participants.first.userId 
-//           : null;
-//     }
-
-//     // Pour les conversations directes, trouve l'autre participant
-//     final other = conversation.participants.firstWhereOrNull(
-//       (p) => p.userId != _currentUserId,
-//     );
-
-//     return other?.userId;
-//   }
-
-//   /// ✅ Scroll vers le bas
-//   void _scrollToBottom() {
-//     if (scrollController.hasClients) {
-//       scrollController.animateTo(
-//         scrollController.position.maxScrollExtent,
-//         duration: const Duration(milliseconds: 300),
-//         curve: Curves.easeOut,
-//       );
-//     }
-//   }
-
-//   /// ✅ Charge plus de messages (pagination)
-//   void onLoadMore() {
-//     if (!isLoadingMore.value && _hasMoreMessages) {
-//       print('📄 Loading more messages...');
-//       loadMessages();
-//     }
-//   }
-
-//   @override
-//   void onClose() {
-//     _markAsRead();
-//     messageController.dispose();
-//     scrollController.dispose();
-//     super.onClose();
-//   }
-// }
 

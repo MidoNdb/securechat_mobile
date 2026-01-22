@@ -1,0 +1,546 @@
+// lib/data/models/auth_data.dart
+
+class AuthData {
+  final String accessToken;
+  final String refreshToken;
+  final String userId;
+  final String deviceId;
+  final String dhPrivateKey;
+  final String signPrivateKey;
+
+  AuthData({
+    required this.accessToken,
+    required this.refreshToken,
+    required this.userId,
+    required this.deviceId,
+    required this.dhPrivateKey,
+    required this.signPrivateKey,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'access_token': accessToken,
+    'refresh_token': refreshToken,
+    'user_id': userId,
+    'device_id': deviceId,
+    'dh_private_key': dhPrivateKey,
+    'sign_private_key': signPrivateKey,
+  };
+
+  factory AuthData.fromJson(Map<String, dynamic> json) => AuthData(
+    accessToken: json['access_token'],
+    refreshToken: json['refresh_token'],
+    userId: json['user_id'],
+    deviceId: json['device_id'],
+    dhPrivateKey: json['dh_private_key'],
+    signPrivateKey: json['sign_private_key'],
+  );
+}  
+
+// lib/data/models/contact.dart
+
+class Contact {
+  final int id;
+  final int userId;
+  final int contactUserId;
+  final String? contactUserName;
+  final String? contactUserAvatar;
+  final String? contactUserPhone;
+  final bool isMarked;
+  final bool isBlocked;
+  final DateTime addedAt;
+
+  Contact({
+    required this.id,
+    required this.userId,
+    required this.contactUserId,
+    this.contactUserName,
+    this.contactUserAvatar,
+    this.contactUserPhone,
+    this.isMarked = false,
+    this.isBlocked = false,
+    required this.addedAt,
+  });
+
+  factory Contact.fromJson(Map<String, dynamic> json) {
+    return Contact(
+      id: json['id'],
+      userId: json['user_id'],
+      contactUserId: json['contact_user_id'],
+      contactUserName: json['contact_user_name'],
+      contactUserAvatar: json['contact_user_avatar'],
+      contactUserPhone: json['contact_user_phone'],
+      isMarked: json['is_marked'] ?? false,
+      isBlocked: json['is_blocked'] ?? false,
+      addedAt: DateTime.parse(json['added_at']),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'user_id': userId,
+      'contact_user_id': contactUserId,
+      'contact_user_name': contactUserName,
+      'contact_user_avatar': contactUserAvatar,
+      'contact_user_phone': contactUserPhone,
+      'is_marked': isMarked,
+      'is_blocked': isBlocked,
+      'added_at': addedAt.toIso8601String(),
+    };
+  }
+}
+
+// lib/data/models/conversation.dart
+
+import 'message.dart';
+import 'participant.dart';
+import 'package:get/get.dart';
+
+class Conversation {
+  final String id;
+  final String type;
+  final String? name;
+  final String? avatar;
+  final DateTime createdAt;
+  final DateTime? lastMessageAt;
+  final int unreadCount;
+  final Message? lastMessage;
+  final List<Participant> participants;
+
+  Conversation({
+    required this.id,
+    required this.type,
+    this.name,
+    this.avatar,
+    required this.createdAt,
+    this.lastMessageAt,
+    this.unreadCount = 0,
+    this.lastMessage,
+    required this.participants,
+  });
+
+  /// ✅ Vérifie si c'est un groupe
+  bool get isGroup => type == 'GROUP';
+
+  /// ✅ Obtient l'autre participant (pour conversations directes)
+  Participant? otherParticipant(String currentUserId) {  // ✅ String
+    if (isGroup || participants.isEmpty) return null;
+
+    return participants.firstWhereOrNull(
+      (p) => p.userId != currentUserId,
+    );
+  }
+
+  /// ✅ Nom à afficher
+  String displayName(String currentUserId) {  // ✅ String
+    return name ?? 'Conversation';
+  }
+
+  /// ✅ Parse depuis JSON (API backend)
+  factory Conversation.fromJson(Map<String, dynamic> json) {
+    return Conversation(
+      id: json['id']?.toString() ?? '',
+      type: json['type']?.toString() ?? 'DIRECT',
+      
+      name: json['display_name']?.toString() ?? 
+            json['name']?.toString() ?? 
+            'Numéro inconnu',
+      
+      avatar: json['avatar']?.toString(),
+      
+      createdAt: json['created_at'] != null
+          ? DateTime.parse(json['created_at'])
+          : DateTime.now(),
+      
+      lastMessageAt: json['last_message_at'] != null
+          ? DateTime.parse(json['last_message_at'])
+          : null,
+      
+      unreadCount: _parseInt(json['unread_count']),
+      
+      lastMessage: json['last_message'] != null
+          ? Message.fromJson(json['last_message'])
+          : null,
+      
+      participants: json['participants'] != null
+          ? (json['participants'] as List)
+              .map((p) => Participant.fromJson(p))
+              .toList()
+          : [],
+    );
+  }
+
+  /// ✅ Convertit en JSON
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'type': type,
+      'name': name,
+      'avatar': avatar,
+      'created_at': createdAt.toIso8601String(),
+      'last_message_at': lastMessageAt?.toIso8601String(),
+      'unread_count': unreadCount,
+      'last_message': lastMessage?.toJson(),
+      'participants': participants.map((p) => p.toJson()).toList(),
+    };
+  }
+
+  /// ✅ Copie avec modifications
+  Conversation copyWith({
+    String? id,
+    String? type,
+    String? name,
+    String? avatar,
+    DateTime? createdAt,
+    DateTime? lastMessageAt,
+    int? unreadCount,
+    Message? lastMessage,
+    List<Participant>? participants,
+  }) {
+    return Conversation(
+      id: id ?? this.id,
+      type: type ?? this.type,
+      name: name ?? this.name,
+      avatar: avatar ?? this.avatar,
+      createdAt: createdAt ?? this.createdAt,
+      lastMessageAt: lastMessageAt ?? this.lastMessageAt,
+      unreadCount: unreadCount ?? this.unreadCount,
+      lastMessage: lastMessage ?? this.lastMessage,
+      participants: participants ?? this.participants,
+    );
+  }
+
+  /// ✅ Helper pour parser des entiers
+  static int _parseInt(dynamic value) {
+    if (value == null) return 0;
+    if (value is int) return value;
+    if (value is String) return int.tryParse(value) ?? 0;
+    return 0;
+  }
+}
+
+// lib/data/models/group.dart
+
+class Group {
+  final int id;
+  final String name;
+  final String? description;
+  final String? avatar;
+  final int createdBy;
+  final DateTime createdAt;
+
+  Group({
+    required this.id,
+    required this.name,
+    this.description,
+    this.avatar,
+    required this.createdBy,
+    required this.createdAt,
+  });
+
+  factory Group.fromJson(Map<String, dynamic> json) {
+    return Group(
+      id: json['id'],
+      name: json['name'],
+      description: json['description'],
+      avatar: json['avatar'],
+      createdBy: json['created_by'],
+      createdAt: DateTime.parse(json['created_at']),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'name': name,
+      'description': description,
+      'avatar': avatar,
+      'created_by': createdBy,
+      'created_at': createdAt.toIso8601String(),
+    };
+  }
+}
+
+// lib/data/models/message_status.dart
+
+enum MessageStatus {
+  sending,
+  sent,
+  delivered,
+  read,
+  failed;
+
+  String get value {
+    switch (this) {
+      case MessageStatus.sending: return 'sending';
+      case MessageStatus.sent: return 'sent';
+      case MessageStatus.delivered: return 'delivered';
+      case MessageStatus.read: return 'read';
+      case MessageStatus.failed: return 'failed';
+    }
+  }
+
+  static MessageStatus fromString(String status) {
+    switch (status.toLowerCase()) {
+      case 'sending': return MessageStatus.sending;
+      case 'sent': return MessageStatus.sent;
+      case 'delivered': return MessageStatus.delivered;
+      case 'read': return MessageStatus.read;
+      case 'failed': return MessageStatus.failed;
+      default: return MessageStatus.sent;
+    }
+  }
+}
+
+// lib/data/models/message.dart
+
+class Message {
+  final String id;
+  final String conversationId;
+  final String senderId;
+  final String? recipientUserId;
+  final String? senderName;
+  final String? decryptedContent;
+  final String encryptedContent;
+  final String? nonce;
+  final String? authTag;
+  final String? signature;
+  final String type;
+  final String? status;
+  final DateTime timestamp;
+  final bool isRead;
+  final bool isDelivered;
+  final Map<String, dynamic>? metadata;
+
+  Message({
+    required this.id,
+    required this.conversationId,
+    required this.senderId,
+    this.recipientUserId,
+    this.senderName,
+    this.decryptedContent,
+    required this.encryptedContent,
+    this.nonce,
+    this.authTag,
+    this.signature,
+    this.type = 'TEXT',
+    this.status,
+    required this.timestamp,
+    this.isRead = false,
+    this.isDelivered = false,
+    this.metadata,
+  });
+
+  factory Message.fromJson(Map<String, dynamic> json) {
+    return Message(
+      id: json['id']?.toString() ?? '',
+      conversationId: json['conversation_id']?.toString() ?? 
+                     json['conversation']?.toString() ?? '',
+      senderId: json['sender_id']?.toString() ??
+               json['from_user']?.toString() ?? '',
+      recipientUserId: json['recipient_user_id']?.toString(),
+      senderName: json['sender_name']?.toString(),
+      encryptedContent: json['encrypted_content']?.toString() ?? '',
+      nonce: json['nonce']?.toString(),
+      authTag: json['auth_tag']?.toString(),
+      signature: json['signature']?.toString(),
+      decryptedContent: null,
+      type: json['type']?.toString() ?? 'TEXT',
+      status: json['status']?.toString(),
+      timestamp: json['created_at'] != null
+          ? DateTime.parse(json['created_at'])
+          : json['timestamp'] != null
+              ? DateTime.parse(json['timestamp'])
+              : DateTime.now(),
+      isRead: json['is_read'] == true,
+      isDelivered: json['is_delivered'] == true,
+      metadata: json['metadata'] != null 
+          ? Map<String, dynamic>.from(json['metadata'])
+          : null,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'conversation_id': conversationId,
+      'sender_id': senderId,
+      if (recipientUserId != null) 'recipient_user_id': recipientUserId,
+      'sender_name': senderName,
+      'encrypted_content': encryptedContent,
+      'nonce': nonce,
+      'auth_tag': authTag,
+      'signature': signature,
+      'type': type,
+      'status': status,
+      'timestamp': timestamp.toIso8601String(),
+      'is_read': isRead,
+      'is_delivered': isDelivered,
+      if (metadata != null) 'metadata': metadata,
+    };
+  }
+
+  Message copyWith({
+    String? recipientUserId,
+    String? decryptedContent,
+    String? status,
+    bool? isRead,
+    bool? isDelivered,
+  }) {
+    return Message(
+      id: id,
+      conversationId: conversationId,
+      senderId: senderId,
+      recipientUserId: recipientUserId ?? this.recipientUserId,
+      senderName: senderName,
+      decryptedContent: decryptedContent ?? this.decryptedContent,
+      encryptedContent: encryptedContent,
+      nonce: nonce,
+      authTag: authTag,
+      signature: signature,
+      type: type,
+      status: status ?? this.status,
+      timestamp: timestamp,
+      isRead: isRead ?? this.isRead,
+      isDelivered: isDelivered ?? this.isDelivered,
+      metadata: metadata,
+    );
+  }
+}
+
+// lib/data/models/participant.dart
+
+class Participant {
+  final String userId;  // ✅ String UUID (corrigé de int)
+  final String phoneNumber;
+  final String? avatar;
+  final String role;
+
+  Participant({
+    required this.userId,
+    required this.phoneNumber,
+    this.avatar,
+    required this.role,
+  });
+
+  /// ✅ Parse depuis JSON (API backend)
+  factory Participant.fromJson(Map<String, dynamic> json) {
+    return Participant(
+      userId: json['user_id']?.toString() ?? '',  // ✅ String
+      phoneNumber: json['phone_number']?.toString() ?? 'Inconnu',
+      avatar: json['avatar']?.toString(),
+      role: json['role']?.toString() ?? 'member',
+    );
+  }
+
+  /// ✅ Convertit en JSON
+  Map<String, dynamic> toJson() {
+    return {
+      'user_id': userId,
+      'phone_number': phoneNumber,
+      'avatar': avatar,
+      'role': role,
+    };
+  }
+} 
+
+
+// lib/data/models/user.dart
+
+class User {
+  final int id;
+  final String userId;
+  final String phoneNumber;
+  final String? phoneNumberHash;
+  final String? displayName;
+  final String? email;
+  final String? avatar;
+  final String? publicKey;
+  final String? safetyNumber;
+  final bool isOnline;
+  final DateTime? lastSeen;
+  final DateTime createdAt;
+
+  User({
+    required this.id,
+    required this.userId,
+    required this.phoneNumber,
+    this.phoneNumberHash,
+    this.displayName,
+    this.email,
+    this.avatar,
+    this.publicKey,
+    this.safetyNumber,
+    this.isOnline = false,
+    this.lastSeen,
+    required this.createdAt,
+  });
+
+  String get name => displayName ?? phoneNumber;
+
+  factory User.fromJson(Map<String, dynamic> json) {
+    return User(
+      id: json['id'],
+      userId: json['user_id'],
+      phoneNumber: json['phone_number'],
+      phoneNumberHash: json['phone_number_hash'],
+      displayName: json['display_name'],
+      email: json['email'],
+      avatar: json['avatar'],
+      publicKey: json['public_key'],
+      safetyNumber: json['safety_number'],
+      isOnline: json['is_online'] ?? false,
+      lastSeen: json['last_seen'] != null
+          ? DateTime.parse(json['last_seen'])
+          : null,
+      createdAt: DateTime.parse(json['created_at']),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'user_id': userId,
+      'phone_number': phoneNumber,
+      'phone_number_hash': phoneNumberHash,
+      'display_name': displayName,
+      'email': email,
+      'avatar': avatar,
+      'public_key': publicKey,
+      'safety_number': safetyNumber,
+      'is_online': isOnline,
+      'last_seen': lastSeen?.toIso8601String(),
+      'created_at': createdAt.toIso8601String(),
+    };
+  }
+
+  User copyWith({
+    int? id,
+    String? userId,
+    String? phoneNumber,
+    String? phoneNumberHash,
+    String? displayName,
+    String? email,
+    String? avatar,
+    String? publicKey,
+    String? safetyNumber,
+    bool? isOnline,
+    DateTime? lastSeen,
+    DateTime? createdAt,
+  }) {
+    return User(
+      id: id ?? this.id,
+      userId: userId ?? this.userId,
+      phoneNumber: phoneNumber ?? this.phoneNumber,
+      phoneNumberHash: phoneNumberHash ?? this.phoneNumberHash,
+      displayName: displayName ?? this.displayName,
+      email: email ?? this.email,
+      avatar: avatar ?? this.avatar,
+      publicKey: publicKey ?? this.publicKey,
+      safetyNumber: safetyNumber ?? this.safetyNumber,
+      isOnline: isOnline ?? this.isOnline,
+      lastSeen: lastSeen ?? this.lastSeen,
+      createdAt: createdAt ?? this.createdAt,
+    );
+  }
+}

@@ -222,30 +222,38 @@ class MessageService extends GetxService {
     }
   }
 
-  Future<List<Message>> _decryptMessages(List<Message> messages) async {
+Future<List<Message>> _decryptMessages(List<Message> messages) async {
   final decrypted = <Message>[];
   final currentUserId = _authService.currentUser.value?.userId;
   
   for (final message in messages) {
     try {
-      // Vérifier d'abord si le message a les champs E2EE
-      if (message.nonce == null || message.authTag == null || message.signature == null) {
-        print('⚠️ Message sans champs E2EE: ${message.id}');
+      // ✅ AJOUT : Vérifier champs E2EE obligatoires
+      if (message.nonce == null || message.nonce!.isEmpty ||
+          message.authTag == null || message.authTag!.isEmpty ||
+          message.signature == null || message.signature!.isEmpty) {
+        print('⚠️ Message ${message.id} sans champs E2EE complets');
         decrypted.add(message.copyWith(
           decryptedContent: '[Message non chiffré]'
         ));
         continue;
       }
       
+      // ✅ Vérifier cache en premier
       final cached = await _secureStorage.getMessagePlaintext(message.id);
       
-      if (cached != null && message.senderId == currentUserId) {
+      if (cached != null) {
         decrypted.add(message.copyWith(decryptedContent: cached));
         print('✅ From cache: ${message.id}');
         continue;
       }
       
+      // ✅ Déchiffrer
       final content = await decryptMessage(message);
+      
+      // ✅ Sauvegarder en cache pour la prochaine fois
+      await _secureStorage.saveMessagePlaintext(message.id, content);
+      
       decrypted.add(message.copyWith(decryptedContent: content));
       
       final preview = content.length > 20 ? '${content.substring(0, 20)}...' : content;
@@ -254,15 +262,17 @@ class MessageService extends GetxService {
     } catch (e) {
       print('❌ Decrypt error ${message.id}: $e');
       
-      // ✅ Gérer gracieusement - Message illisible
+      // ✅ AMÉLIORATION : Message d'erreur informatif
       String fallbackText;
       
       if (e.toString().contains('Signature invalide')) {
-        fallbackText = '[Message chiffré avec anciennes clés - illisible]';
+        fallbackText = '[Message chiffré avec anciennes clés]';
+      } else if (e.toString().contains('recipientUserId missing')) {
+        fallbackText = '[Erreur: destinataire inconnu]';
       } else if (e.toString().contains('E2EE fields missing')) {
-        fallbackText = '[Message non chiffré]';
+        fallbackText = '[Message corrompu]';
       } else {
-        fallbackText = '[Erreur de déchiffrement]';
+        fallbackText = '[Message illisible]';
       }
       
       decrypted.add(message.copyWith(decryptedContent: fallbackText));
@@ -274,17 +284,18 @@ class MessageService extends GetxService {
 
 Future<String> decryptMessage(Message message) async {
   try {
-    print('🔓 Decrypting from: ${message.senderId}');
+    print('🔓 Decrypting message ${message.id}');
+    print('   From: ${message.senderId}');
     
-    // ✅ Vérification stricte des champs E2EE
+    // ✅ VÉRIFICATION STRICTE des champs E2EE
     if (message.nonce == null || message.nonce!.isEmpty) {
-      throw Exception('E2EE fields missing: nonce is null or empty');
+      throw Exception('E2EE fields missing: nonce');
     }
     if (message.authTag == null || message.authTag!.isEmpty) {
-      throw Exception('E2EE fields missing: authTag is null or empty');
+      throw Exception('E2EE fields missing: authTag');
     }
     if (message.signature == null || message.signature!.isEmpty) {
-      throw Exception('E2EE fields missing: signature is null or empty');
+      throw Exception('E2EE fields missing: signature');
     }
     
     final myDhPrivate = await _secureStorage.getDHPrivateKey();
@@ -295,20 +306,33 @@ Future<String> decryptMessage(Message message) async {
     
     final currentUserId = _authService.currentUser.value?.userId;
     
+    // ✅ LOGIQUE CORRECTE : Déterminer qui est "l'autre"
     String otherUserId;
+    
     if (message.senderId == currentUserId) {
-      if (message.recipientUserId == null) {
+      // ✅ CAS 1 : C'est NOTRE message → Utiliser le DESTINATAIRE
+      if (message.recipientUserId == null || message.recipientUserId!.isEmpty) {
+        // ⚠️ FALLBACK : Si recipient manque, chercher dans participants
+        print('   ⚠️ recipientUserId manquant, tentative fallback...');
+        
+        // Option A : Utiliser le premier participant qui n'est pas nous
+        // (nécessite d'avoir accès à la conversation, sinon lever exception)
         throw Exception('recipientUserId missing for own message');
       }
+      
       otherUserId = message.recipientUserId!;
-      print('  → Using recipient keys: $otherUserId');
+      print('   → Message de NOUS → Clés du DESTINATAIRE: $otherUserId');
+      
     } else {
+      // ✅ CAS 2 : Message REÇU → Utiliser l'EXPÉDITEUR
       otherUserId = message.senderId;
-      print('  → Using sender keys: $otherUserId');
+      print('   → Message REÇU → Clés de l\'EXPÉDITEUR: $otherUserId');
     }
     
+    // ✅ Récupérer clés publiques de "l'autre"
     final otherUserKeys = await _getRecipientPublicKeys(otherUserId);
     
+    // ✅ Déchiffrer
     final plaintext = await _cryptoService.decryptMessage(
       ciphertextB64: message.encryptedContent,
       nonceB64: message.nonce!,
@@ -319,43 +343,15 @@ Future<String> decryptMessage(Message message) async {
       theirSignPublicKeyB64: otherUserKeys['sign_public_key']!,
     );
     
-    print('✅ Decrypted');
+    print('✅ Déchiffrement réussi');
     
     return plaintext;
+    
   } catch (e) {
     print('❌ decryptMessage error: $e');
     rethrow;
   }
 }
-  
-  // Future<List<Message>> _decryptMessages(List<Message> messages) async {
-  //   final decrypted = <Message>[];
-  //   final currentUserId = _authService.currentUser.value?.userId;
-    
-  //   for (final message in messages) {
-  //     try {
-  //       final cached = await _secureStorage.getMessagePlaintext(message.id);
-        
-  //       if (cached != null && message.senderId == currentUserId) {
-  //         decrypted.add(message.copyWith(decryptedContent: cached));
-  //         print('✅ From cache: ${message.id}');
-  //         continue;
-  //       }
-        
-  //       final content = await decryptMessage(message);
-  //       decrypted.add(message.copyWith(decryptedContent: content));
-        
-  //       final preview = content.length > 20 ? '${content.substring(0, 20)}...' : content;
-  //       print('✅ Decrypted: ${message.id} - "$preview"');
-        
-  //     } catch (e) {
-  //       print('❌ Decrypt error ${message.id}: $e');
-  //       decrypted.add(message);
-  //     }
-  //   }
-    
-  //   return decrypted;
-  // }
   
   Future<void> markConversationAsRead(String conversationId) async {
     try {

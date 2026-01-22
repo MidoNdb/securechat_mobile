@@ -33,6 +33,7 @@ from .conversation_serializers import (
 from .message_serializers import (
     MessageListSerializer,
     MessageDetailSerializer,
+    MessageDeleteSerializer,
     MessageCreateSerializer,
     MessageDeleteSerializer,
 )

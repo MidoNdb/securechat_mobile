@@ -14,6 +14,8 @@ class ChatBinding extends Bindings {
     );
     Get.lazyPut<MainShellController>(() => MainShellController());
   }
+  // Get.lazyPut<ImageBubbleController>(() => ImageBubbleController());
+  
 }
 
 

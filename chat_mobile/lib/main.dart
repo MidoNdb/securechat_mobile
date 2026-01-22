@@ -1,6 +1,9 @@
 // lib/main.dart
 
 import 'package:chat_mobile/data/services/contact_service.dart';
+import 'package:chat_mobile/data/services/file_service.dart';
+import 'package:chat_mobile/data/services/image_message_service.dart';
+import 'package:chat_mobile/data/services/voice_message_service.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'app/routes/app_pages.dart';
@@ -47,18 +50,27 @@ Future<void> initCriticalServices() async {
   
   // 3. AuthService
   Get.put(AuthService(), permanent: true);
-  
+  Get.put(CryptoService(), permanent: true);
+   
   // 4. BiometricService
   Get.put(BiometricService(), permanent: true);
   
   // 5. CryptoService (NOUVEAU)
-  Get.put(CryptoService(), permanent: true);
+  
   
   // 6. MessageService (dépend de Storage + DioClient + Crypto)
   Get.put(MessageService(), permanent: true);
-  
+   Get.put(
+      FileService(),
+      permanent: true,
+    );
   
   Get.put(ContactService(), permanent: true);
+  Get.put(
+      ImageMessageService(),
+      permanent: true,
+    );
+    Get.put(VoiceMessageService(), permanent: true);
 }
 
 class MyApp extends StatelessWidget {
